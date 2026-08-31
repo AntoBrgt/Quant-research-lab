@@ -22,7 +22,16 @@ except ImportError:  # pragma: no cover - optional dependency
     load_dotenv = None
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+
+try:
+    from langchain_ollama import ChatOllama
+except ImportError:  # pragma: no cover - optional dependency for local usage
+    ChatOllama = None
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:  # pragma: no cover - optional dependency for OpenAI usage
+    ChatOpenAI = None
 
 
 # ---------------------------------------------------------------------------
@@ -33,13 +42,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS_PATH = PROJECT_ROOT / "data" / "processed" / "documents.parquet"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "signals.parquet"
 
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+MODEL_NAME = os.getenv("OLLAMA_MODEL", os.getenv("OPENAI_MODEL", "qwen3:8b"))
 TEMPERATURE = 0
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 
 SYSTEM_PROMPT = """
 You are extracting observable financial signals from SEC filing text for a
 quantitative research pipeline.
+
+This is a signal-extraction step only. It must not generate investment advice,
+portfolio recommendations, or action labels such as BUY, SELL, HOLD, or WATCH.
+The later strategy and recommendation layers are separate.
 
 Rules:
 - Use only information explicitly present in the supplied document chunk.
@@ -163,24 +176,44 @@ class SignalExtraction(BaseModel):
 # ---------------------------------------------------------------------------
 
 def build_llm():
-    """Build the configured LLM client.
+    """Build the configured local or cloud LLM client.
 
-    The abstraction is intentionally thin so it can later support more providers
-    without rewriting the extraction logic.
+    The default path is a local Ollama model to avoid token costs during the
+    research prototype phase.
     """
-    if LLM_PROVIDER != "openai":
-        raise ValueError("Only the 'openai' provider is currently supported.")
+    if LLM_PROVIDER == "ollama":
+        if ChatOllama is None:
+            raise ImportError(
+                "langchain-ollama is required for Ollama usage. Install it with pip."
+            )
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "OPENAI_API_KEY is not set. Add it to your environment before running this script."
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        return ChatOllama(
+            model=MODEL_NAME,
+            base_url=base_url,
+            temperature=TEMPERATURE,
         )
 
-    return ChatOpenAI(
-        model=MODEL_NAME,
-        temperature=TEMPERATURE,
-        api_key=api_key,
+    if LLM_PROVIDER == "openai":
+        if ChatOpenAI is None:
+            raise ImportError(
+                "langchain-openai is required for OpenAI usage. Install it with pip."
+            )
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is not set. Add it to your environment before running this script."
+            )
+
+        return ChatOpenAI(
+            model=MODEL_NAME,
+            temperature=TEMPERATURE,
+            api_key=api_key,
+        )
+
+    raise ValueError(
+        "Unsupported LLM_PROVIDER. Use 'ollama' or 'openai'."
     )
 
 

@@ -115,15 +115,20 @@ The resulting DataFrame contains rows with:
 - `source_file`
 
 ### LLM configuration
-The extraction layer uses LangChain and OpenAI-compatible structured output.
+The extraction layer uses LangChain with a local Ollama model by default, so it does not require paying for API tokens during the prototype phase.
 
-Required environment variable:
+For this project, Qwen is the recommended default local model because it tends to handle structured extraction and instruction-following well on SEC text.
+
+Required environment variables for Ollama:
+
+- `OLLAMA_BASE_URL` (optional, defaults to `http://localhost:11434`)
+- `OLLAMA_MODEL` (optional, defaults to `qwen3:8b`)
+
+Optional fallback for OpenAI-compatible usage:
 
 - `OPENAI_API_KEY`
-
-Optional variable:
-
-- `OPENAI_MODEL` (defaults to `gpt-4o-mini`)
+- `OPENAI_MODEL`
+- `LLM_PROVIDER` can be set to `ollama` or `openai`
 
 ### Example commands
 
@@ -134,10 +139,43 @@ python src/extract_signals.py --ticker AAPL MSFT JPM
 python src/extract_signals.py --max-chunks 20
 ```
 
+For a local Ollama setup, the model should already be pulled and running on your machine, for example:
+
+```bash
+ollama pull qwen3:8b
+```
+
+### Architecture boundary
+
+This step is intentionally limited to the signal-extraction layer. It does not produce BUY/SELL/HOLD recommendations and does not use future market data.
+
+The future architecture is:
+
+```text
+Financial documents
+    ↓
+Structured signals
+    ↓
+News signals
+    ↓
+Market data
+    ↓
+Historical validation
+    ↓
+Strategy engine
+    ↓
+Portfolio context
+    ↓
+BUY / HOLD / SELL / WATCH
+```
+
+This separation is required so the same signal can support different strategies over different horizons.
+
 ### Prototype limitations
 
 - The model receives only the filing text and metadata, never future stock-price data.
 - We do not yet perform backtesting, portfolio analysis, or recommendations.
 - The LLM is restricted to a fixed signal taxonomy and is designed for research use, not investment advice.
+- Local model quality can vary with the Ollama model choice and runtime environment.
 - The extraction layer is intentionally minimal and will need refinement as the project grows.
 

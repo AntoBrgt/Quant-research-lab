@@ -42,7 +42,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS_PATH = PROJECT_ROOT / "data" / "processed" / "documents.parquet"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "signals.parquet"
 
-MODEL_NAME = os.getenv("OLLAMA_MODEL", os.getenv("OPENAI_MODEL", "qwen3:8b"))
+MODEL_NAME = os.getenv("OLLAMA_MODEL", os.getenv("OPENAI_MODEL", "llama3.2"))
 TEMPERATURE = 0
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 

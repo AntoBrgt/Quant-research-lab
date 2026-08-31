@@ -195,6 +195,29 @@ def classify_section(line: str) -> Optional[str]:
     return None
 
 
+def _is_page_number_line(line: str) -> bool:
+    """True for a line that is just a bare page number, e.g. "17"."""
+    return bool(re.fullmatch(r"\d{1,4}", line.strip()))
+
+
+def _looks_like_toc_entry(lines: list[str], header_idx: int, lookahead: int = 10) -> bool:
+    """Detect table-of-contents / index rows disguised as section headings.
+
+    In the plain-text renderings we process, a table of contents (or a financial-
+    statement index later in the document) lists each heading on its own line and
+    is immediately followed a line or two later by a bare page number. A real body
+    heading is instead followed by prose. Checking the next non-blank line lets us
+    tell the two apart without hardcoding where the table of contents starts or
+    ends.
+    """
+    for line in lines[header_idx + 1 : header_idx + 1 + lookahead]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return _is_page_number_line(stripped)
+    return False
+
+
 def detect_sections(text: str) -> list[dict]:
     """Split the document into meaningful sections using SEC heading heuristics.
 
@@ -211,10 +234,17 @@ def detect_sections(text: str) -> list[dict]:
         if not name:
             continue
 
-        # A single 10-K/10-Q often includes the table of contents plus the actual
-        # body sections. Treating both as distinct sections creates duplicate
-        # chunk IDs for the same logical section. Keep the first real occurrence,
-        # which is the one closest to the actual document body.
+        # A single 10-K/10-Q often includes the table of contents (and sometimes a
+        # second index further in, e.g. before the financial statements) plus the
+        # actual body sections. Table-of-contents rows read as real headings too,
+        # so skip anything that looks like one of those index entries.
+        if _looks_like_toc_entry(lines, i):
+            continue
+
+        # Treating the table of contents and the real body heading as distinct
+        # sections would create duplicate chunk IDs for the same logical section.
+        # Keep the first real (non-index) occurrence, which is the one closest to
+        # the actual document body.
         if name in seen_sections:
             continue
 

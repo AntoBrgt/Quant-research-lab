@@ -36,58 +36,58 @@ logger = logging.getLogger(__name__)
 
 SECTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "Business": (
-        r"item\s*1\.?\s*business",
-        r"\bbusiness\b",
+        r"^\s*item\s*1\.?\s*business\s*$",
+        r"^\s*business\s*$",
     ),
     "Risk Factors": (
-        r"item\s*1a\.?\s*risk\s*factors",
-        r"\brisk\s*factors\b",
+        r"^\s*item\s*1a\.?\s*risk\s*factors\s*$",
+        r"^\s*risk\s*factors\s*$",
     ),
     "Unresolved Staff Comments": (
-        r"item\s*1b\.?\s*unresolved\s*staff\s*comments",
-        r"\bunresolved\s*staff\s*comments\b",
+        r"^\s*item\s*1b\.?\s*unresolved\s*staff\s*comments\s*$",
+        r"^\s*unresolved\s*staff\s*comments\s*$",
     ),
     "Properties": (
-        r"item\s*2\.?\s*properties",
-        r"\bproperties\b",
+        r"^\s*item\s*2\.?\s*properties\s*$",
+        r"^\s*properties\s*$",
     ),
     "Legal Proceedings": (
-        r"item\s*3\.?\s*legal\s*proceedings",
-        r"\blegal\s*proceedings\b",
+        r"^\s*item\s*3\.?\s*legal\s*proceedings\s*$",
+        r"^\s*legal\s*proceedings\s*$",
     ),
     "Market for Registrant's Common Equity": (
-        r"item\s*5\.?\s*market\s*for\s*registrant's\s*common\s*equity",
-        r"\bmarket\s*for\s*registrant's\s*common\s*equity\b",
+        r"^\s*item\s*5\.?\s*market\s*for\s*registrant's\s*common\s*equity\s*$",
+        r"^\s*market\s*for\s*registrant's\s*common\s*equity\s*$",
     ),
     "Selected Financial Data": (
-        r"item\s*6\.?\s*selected\s*financial\s*data",
-        r"\bselected\s*financial\s*data\b",
+        r"^\s*item\s*6\.?\s*selected\s*financial\s*data\s*$",
+        r"^\s*selected\s*financial\s*data\s*$",
     ),
     "Management's Discussion and Analysis": (
-        r"item\s*7\.?\s*management's\s*discussion\s*and\s*analysis",
-        r"management's\s+discussion\s+and\s+analysis",
-        r"md&a",
+        r"^\s*item\s*7\.?\s*management's\s*discussion\s*and\s*analysis\s*$",
+        r"^\s*management's\s+discussion\s+and\s+analysis\s*$",
+        r"^\s*md&a\s*$",
     ),
     "Quantitative and Qualitative Disclosures About Market Risk": (
-        r"item\s*7a\.?\s*quantitative\s*and\s*qualitative\s*disclosures\s*about\s*market\s*risk",
-        r"quantitative\s*and\s*qualitative\s*disclosures\s*about\s*market\s*risk",
+        r"^\s*item\s*7a\.?\s*quantitative\s*and\s*qualitative\s*disclosures\s*about\s*market\s*risk\s*$",
+        r"^\s*quantitative\s*and\s*qualitative\s*disclosures\s*about\s*market\s*risk\s*$",
     ),
     "Financial Statements": (
-        r"financial\s*statements",
-        r"consolidated\s*financial\s*statements",
-        r"item\s*8\.?\s*financial\s*statements",
+        r"^\s*item\s*8\.?\s*financial\s*statements\s*$",
+        r"^\s*financial\s*statements\s*$",
+        r"^\s*consolidated\s*financial\s*statements\s*$",
     ),
     "Notes to Financial Statements": (
-        r"notes\s*to\s*financial\s*statements",
-        r"notes\s*to\s*consolidated\s*financial\s*statements",
+        r"^\s*notes\s*to\s*financial\s*statements\s*$",
+        r"^\s*notes\s*to\s*consolidated\s*financial\s*statements\s*$",
     ),
     "MD&A": (
-        r"management's\s+discussion\s+and\s+analysis",
-        r"md&a",
+        r"^\s*management's\s+discussion\s+and\s+analysis\s*$",
+        r"^\s*md&a\s*$",
     ),
     "Market Risk": (
-        r"market\s*risk",
-        r"item\s*7a\.?\s*market\s*risk",
+        r"^\s*market\s*risk\s*$",
+        r"^\s*item\s*7a\.?\s*market\s*risk\s*$",
     ),
     "Full Document": (
         r"^.*$",
@@ -169,9 +169,18 @@ def extract_metadata(text: str, source_file: str) -> dict:
 
 
 def classify_section(line: str) -> Optional[str]:
-    """Classify an SEC heading into a canonical section name."""
+    """Classify a heading-like SEC line into a canonical section name.
+
+    This is intentionally strict: we only match title-like lines, not ordinary
+    descriptive text in the middle of a paragraph. Broad text matches like
+    "business" inside a sentence are not valid section headings.
+    """
     text = line.strip()
     if not text:
+        return None
+
+    # Ignore long narrative lines and body text that happen to contain a keyword.
+    if len(text) > 180:
         return None
 
     normalized = normalize_label(text)
@@ -180,27 +189,8 @@ def classify_section(line: str) -> Optional[str]:
             continue
 
         for pattern in patterns:
-            if re.search(pattern, text, flags=re.IGNORECASE):
+            if re.fullmatch(pattern, text, flags=re.IGNORECASE):
                 return section_name
-
-        if any(alias in normalized for alias in [
-            "management discussion and analysis",
-            "risk factors",
-            "financial statements",
-            "notes to financial statements",
-            "legal proceedings",
-            "market risk",
-            "business",
-            "properties",
-            "selected financial data",
-            "unresolved staff comments",
-        ]):
-            for section_name, patterns in SECTION_PATTERNS.items():
-                if section_name == "Full Document":
-                    continue
-                for pattern in patterns:
-                    if normalize_label(pattern) in normalized:
-                        return section_name
 
     return None
 
@@ -214,11 +204,22 @@ def detect_sections(text: str) -> list[dict]:
     """
     lines = text.splitlines()
     headers: list[tuple[int, str]] = []
+    seen_sections: set[str] = set()
 
     for i, line in enumerate(lines):
         name = classify_section(line)
-        if name:
-            headers.append((i, name))
+        if not name:
+            continue
+
+        # A single 10-K/10-Q often includes the table of contents plus the actual
+        # body sections. Treating both as distinct sections creates duplicate
+        # chunk IDs for the same logical section. Keep the first real occurrence,
+        # which is the one closest to the actual document body.
+        if name in seen_sections:
+            continue
+
+        seen_sections.add(name)
+        headers.append((i, name))
 
     if not headers:
         logger.warning("No recognizable SEC section headings found; using full document")
@@ -398,6 +399,9 @@ def build_dataset(tickers: Optional[Iterable[str]] = None) -> pd.DataFrame:
         raise ValueError("No valid document chunks were produced from the raw EDGAR inputs")
 
     df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
     expected_columns = [
         "ticker",
         "filing_type",
@@ -415,8 +419,48 @@ def build_dataset(tickers: Optional[Iterable[str]] = None) -> pd.DataFrame:
     return df
 
 
+def validate_dataset(df: pd.DataFrame) -> None:
+    """Validate invariants required for a clean chunk-level document dataset."""
+    if df.empty:
+        raise ValueError("Processed document dataset is empty.")
+
+    duplicate_mask = df.duplicated(
+        subset=["ticker", "filing_type", "section", "chunk_id"],
+        keep=False,
+    )
+    if duplicate_mask.any():
+        duplicates = df.loc[
+            duplicate_mask,
+            ["ticker", "filing_type", "section", "chunk_id", "chunk_index"],
+        ]
+        raise ValueError(
+            "Duplicate chunk IDs detected in processed document dataset:\n"
+            f"{duplicates.to_string(index=False)}"
+        )
+
+    if not df["chunk_id"].is_unique:
+        raise ValueError("chunk_id must be unique across the processed document dataset.")
+
+    logger.info("Dataset invariant check passed: %d rows, %d unique chunk_ids", len(df), df["chunk_id"].nunique())
+
+
+def print_dataset_summary(df: pd.DataFrame) -> None:
+    """Print a compact diagnostic summary for the generated dataset."""
+    print(f"Total rows: {len(df)}")
+    print(f"Unique chunk IDs: {df['chunk_id'].nunique()}")
+    print(f"Duplicate chunk IDs: {df['chunk_id'].duplicated().sum()}")
+    print("Rows per ticker:")
+    print(df["ticker"].value_counts().to_string())
+    print("Rows per section:")
+    print(df["section"].value_counts().to_string())
+    print("First 10 chunk IDs:")
+    print(df["chunk_id"].head(10).to_list())
+
+
 def save_dataset(df: pd.DataFrame, output_path: Path = OUTPUT_FILE) -> None:
-    """Persist the processed dataset to Parquet."""
+    """Persist the processed dataset to Parquet after strict validation."""
+    validate_dataset(df)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, index=False)
     logger.info("Saved %d total chunks to %s", len(df), output_path)

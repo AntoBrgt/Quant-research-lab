@@ -259,6 +259,9 @@ def filter_documents(
 
     filtered["section_norm"] = filtered["section"].fillna("").astype(str).str.strip()
 
+    priority_rank = {section: idx for idx, section in enumerate(PRIORITY_SECTIONS)}
+    filtered["priority_rank"] = filtered["section_norm"].map(priority_rank).fillna(len(priority_rank))
+
     priority_mask = filtered["section_norm"].isin(PRIORITY_SECTIONS) | filtered["section_norm"].str.contains(
         "md&a|risk factors|business|financial statements|notes to financial statements|market risk",
         case=False,
@@ -269,12 +272,15 @@ def filter_documents(
     rest = filtered[~priority_mask].copy()
 
     ordered = pd.concat([prioritized, rest], ignore_index=True)
-    ordered = ordered.sort_values(["ticker", "filing_date", "section", "chunk_id"]).reset_index(drop=True)
+    ordered = ordered.sort_values(
+        ["ticker", "priority_rank", "filing_date", "chunk_id"],
+        kind="mergesort",
+    ).reset_index(drop=True)
 
     if max_chunks is not None:
         ordered = ordered.head(max_chunks).copy()
 
-    return ordered
+    return ordered.drop(columns=["priority_rank"], errors="ignore")
 
 
 # ---------------------------------------------------------------------------

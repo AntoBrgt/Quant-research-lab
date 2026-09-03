@@ -15,6 +15,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+import cache
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -377,6 +379,7 @@ def process_document(file_path: Path) -> list[dict]:
                     "chunk_id": chunk_id,
                     "chunk_index": chunk_index,
                     "text": chunk_text,
+                    "content_hash": cache.content_hash(chunk_text),
                     "source_file": metadata["source_file"],
                     "accession_number": metadata["accession_number"],
                     "document_length": len(raw_text),
@@ -440,6 +443,7 @@ def build_dataset(tickers: Optional[Iterable[str]] = None) -> pd.DataFrame:
         "chunk_id",
         "chunk_index",
         "text",
+        "content_hash",
         "source_file",
         "accession_number",
         "document_length",
@@ -470,6 +474,23 @@ def validate_dataset(df: pd.DataFrame) -> None:
 
     if not df["chunk_id"].is_unique:
         raise ValueError("chunk_id must be unique across the processed document dataset.")
+
+    # Duplicate content is a real, worth-knowing data-quality signal (e.g. the
+    # same boilerplate paragraph chunked twice under different chunk_ids). It is
+    # surfaced here rather than silently collapsed with drop_duplicates(), which
+    # would just hide it -- the actual fix, if one is needed, belongs in the
+    # chunking logic above, not in a downstream filter.
+    duplicate_hash_mask = df["content_hash"].duplicated(keep=False)
+    if duplicate_hash_mask.any():
+        duplicate_groups = df.loc[
+            duplicate_hash_mask,
+            ["ticker", "section", "chunk_id", "content_hash"],
+        ].sort_values("content_hash")
+        logger.warning(
+            "Detected %d chunks with duplicate content_hash (same content, different chunk_id):\n%s",
+            duplicate_hash_mask.sum(),
+            duplicate_groups.to_string(index=False),
+        )
 
     logger.info("Dataset invariant check passed: %d rows, %d unique chunk_ids", len(df), df["chunk_id"].nunique())
 

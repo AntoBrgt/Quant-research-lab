@@ -1,0 +1,14 @@
+pandas
+pyarrow
+numpy
+pydantic
+langchain
+langchain-core
+langchain-ollama
+langchain-openai
+langchain-anthropic
+python-dotenv
+yfinance
+requests
+streamlit
+pytest

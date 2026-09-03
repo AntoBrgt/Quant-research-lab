@@ -123,9 +123,8 @@ def main() -> None:
     )
 
     output_path = _output_path(args.source)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    signals.to_parquet(output_path, index=False)
-    logger.info("Saved %d signals to %s", len(signals), output_path)
+    combined = signal_extraction.save_signals(signals, output_path)
+    logger.info("Saved %d new signals (%d total on disk) to %s", len(signals), len(combined), output_path)
     logger.info("Summary: %s", summary)
 
 

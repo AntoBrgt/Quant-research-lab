@@ -180,12 +180,14 @@ def get_ticker_to_cik() -> dict[str, str]:
 
 def get_latest_filing(
     cik: str,
-    preferred_forms: tuple[str, ...] = ("10-K", "10-Q"),
+    preferred_forms: tuple[str, ...] = ("10-K", "10-Q", "20-F"),
 ) -> Optional[dict]:
     """
-    Return metadata for the latest available 10-K.
+    Return metadata for the latest available annual/quarterly filing.
 
-    If no 10-K exists, fall back to the latest 10-Q.
+    Tries 10-K, then 10-Q, then 20-F (the annual report foreign private
+    issuers file instead of a 10-K -- e.g. Sony, Ferrari N.V. -- since they
+    are SEC-registered but don't file domestic forms).
     """
     url = SEC_SUBMISSIONS_URL.format(cik=cik)
 

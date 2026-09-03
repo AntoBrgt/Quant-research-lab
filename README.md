@@ -186,6 +186,60 @@ streamlit run app.py
 
 Upload a portfolio CSV, pick a risk profile and strategy, and run analysis. Only tickers with no cached signals yet trigger new (cache-first) extraction -- everything else reuses shared research.
 
+## STEP 5 — Portfolio input normalization
+
+Real users upload broker transaction exports (every BUY/SELL/DIVIDEND/CASH/corporate-action event), not the clean `ticker, quantity, average_cost` snapshot `portfolio.py` was originally built for. `src/portfolio_importers/` bridges the two, broker-agnostically:
+
+```text
+raw broker CSV
+    -> detect.detect_format()                        (column-based, not filename-based)
+    -> a per-broker adapter (e.g. trade_republic.py)  -- NORMALIZATION
+    -> schema.CanonicalTransaction rows
+    -> schema.reconstruct_positions()                 -- RECONSTRUCTION
+    -> schema.CanonicalPosition rows
+    -> schema.to_simple_portfolio()                   -- bridges to portfolio.py's existing schema
+    -> portfolio.py (validate_portfolio / enrich_positions / recommendations, unchanged)
+```
+
+Normalization and reconstruction never touch the network or live prices -- an imported portfolio can be built and tested with zero network access. Market-price enrichment stays `portfolio.py`'s separate job, applied after reconstruction.
+
+### Canonical transaction schema (`portfolio_importers/schema.py`)
+
+| Field | Notes |
+|---|---|
+| `transaction_id` | Preserved from the broker; must be unique |
+| `date` | Full timestamp (not just a calendar date) -- ordering matters for cost-basis accounting |
+| `instrument_id` | Broker-agnostic identity -- see below |
+| `identity_type` | `ISIN` \| `SYMBOL` \| `NAME` \| `BROKER_ID` -- how trustworthy `instrument_id` is |
+| `name`, `symbol`, `asset_class` | Preserved as given by the broker |
+| `side` | `BUY` \| `SELL` \| `DIVIDEND` \| `INTEREST` \| `CASH_IN` \| `CASH_OUT` \| `OTHER` -- only `BUY`/`SELL` affect reconstruction |
+| `quantity`, `price`, `fees`, `tax` | Always non-negative magnitudes; direction lives in `side`, never in a sign |
+| `currency`, `amount` | `amount` keeps the broker's own signed net cash flow |
+| `broker`, `raw_type` | Traceability back to the source row |
+
+### Canonical position schema
+
+`instrument_id, name, symbol, asset_class, quantity, average_cost, total_invested, total_fees, currency`.
+
+**Cost-basis methodology: moving-average cost**, not FIFO/LIFO lot tracking, and not a tax-accounting method -- for portfolio analytics only, no tax/accounting claim is made. A BUY updates `average_cost` as a quantity-weighted average; a SELL reduces `quantity` only, leaving `average_cost` of the remaining shares unchanged. `total_invested = quantity * average_cost` (the cost basis of what's currently held). `total_fees` sums every fee/tax paid on the instrument, ever -- not reduced by sells. A position that nets to (approximately) zero quantity is not returned as a current holding.
+
+### Instrument identity
+
+`symbol` is not assumed to be a ticker. `instrument_id` is chosen in priority order -- ISIN (detected by shape: `^[A-Z]{2}[A-Z0-9]{9}[0-9]$`) > symbol/ticker > name -- and `identity_type` records which tier was used. This layer does **not** resolve an ISIN to a tradeable ticker (no security-master lookup); `schema.to_simple_portfolio()` uses `symbol` as-is, so a fund ISIN with no ticker mapping simply fails `portfolio.py`'s existing ticker validation, honestly, rather than being silently guessed.
+
+### How broker adapters work
+
+Each adapter is one module in `src/portfolio_importers/` (e.g. `trade_republic.py`) that owns:
+- `REQUIRED_COLUMNS`: the raw columns it needs (used by `detect.py` for format detection)
+- `parse(df) -> (list[CanonicalTransaction], list[rejected_row])`: maps the broker's own transaction-type vocabulary to `TransactionSide`, resolves instrument identity, and validates each row -- a malformed row (bad date/number, a trade missing its instrument, a duplicate `transaction_id`) is collected with a reason in the rejected list rather than raising and aborting the whole import, or being silently dropped.
+
+**To add a new broker:** write `src/portfolio_importers/<broker>.py` with its own `REQUIRED_COLUMNS` and a `parse()` matching the shape above; add one `elif`-equivalent branch to `detect.detect_format()`; add the module to `app.py`'s `IMPORTERS` dict. No other file needs to change -- `schema.reconstruct_positions()` is broker-agnostic and already handles whatever `CanonicalTransaction` rows the new adapter produces.
+
+### Supported input formats today
+
+- **Trade Republic transaction export** (`src/portfolio_importers/trade_republic.py`)
+- **Plain portfolio CSV** (`ticker, quantity, average_cost[, currency]`) -- `portfolio.py`'s original format, still fully supported, detected as `"canonical"`
+
 ### Architecture boundary
 
 Recommendations are model outputs with stated evidence, confidence, and data freshness -- not personalized financial advice, not a promise of performance, and never a fabricated price target.
@@ -197,4 +251,7 @@ Recommendations are model outputs with stated evidence, confidence, and data fre
 - JPM's filing text doesn't match the current section-heading regexes for Business/Risk Factors (only "Notes to Financial Statements" is detected) -- the heading heuristics in `process_documents.py` need broadening before JPM-style filings are fully covered.
 - The news provider (`yfinance` headlines) is free and best-effort, not a real news feed -- coverage and quality will be thin for less-followed tickers.
 - Sector exposure depends on `yfinance`'s `info` payload, which is itself best-effort and can be missing per ticker.
+- Corporate actions (spin-offs, splits, mergers) are not modeled as position-changing events -- a `SPIN_OFF` row, for example, is preserved but never turns into a new position, and is rejected outright if it lacks a currency (observed on a real export).
+- The import-preview UI (README STEP 5) is intentionally not wired into the recommendation flow yet -- `schema.to_simple_portfolio()` is the ready-made bridge for connecting them.
+- Only one broker adapter exists today (Trade Republic); `detect.py`'s precedence logic for an ambiguous/overlapping schema between two future adapters is untested against a real second broker.
 

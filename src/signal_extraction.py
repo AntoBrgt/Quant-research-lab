@@ -444,3 +444,27 @@ def run_extraction(
         chunks_processed, llm_calls_made, len(output),
     )
     return output, summary
+
+
+def save_signals(new_signals: pd.DataFrame, output_path) -> pd.DataFrame:
+    """Merge new signal rows into whatever's already saved at `output_path` and persist.
+
+    A run scoped to one ticker/section must never clobber signals already saved
+    for other tickers -- every caller (the CLI and the app) must go through this
+    rather than writing `new_signals` directly.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_path.exists():
+        existing = pd.read_parquet(output_path)
+        combined = pd.concat([existing, new_signals], ignore_index=True) if not new_signals.empty else existing
+        # Re-running the same scope should not duplicate rows: a signal is
+        # identified by which chunk it came from plus its own content.
+        dedup_columns = [c for c in ["chunk_id", "signal_type", "evidence"] if c in combined.columns]
+        if dedup_columns:
+            combined = combined.drop_duplicates(subset=dedup_columns, keep="last")
+    else:
+        combined = new_signals
+
+    combined.to_parquet(output_path, index=False)
+    return combined

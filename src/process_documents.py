@@ -58,16 +58,26 @@ SECTION_PATTERNS: dict[str, tuple[str, ...]] = {
         r"^\s*legal\s*proceedings\s*$",
     ),
     "Market for Registrant's Common Equity": (
-        r"^\s*item\s*5\.?\s*market\s*for\s*registrant's\s*common\s*equity\s*$",
-        r"^\s*market\s*for\s*registrant's\s*common\s*equity\s*$",
+        r"^\s*item\s*5\.?\s*market\s*for\s*registrant['’]s\s*common\s*equity\s*$",
+        r"^\s*market\s*for\s*registrant['’]s\s*common\s*equity\s*$",
     ),
     "Selected Financial Data": (
         r"^\s*item\s*6\.?\s*selected\s*financial\s*data\s*$",
         r"^\s*selected\s*financial\s*data\s*$",
     ),
     "Management's Discussion and Analysis": (
-        r"^\s*item\s*7\.?\s*management's\s*discussion\s*and\s*analysis\s*$",
-        r"^\s*management's\s+discussion\s+and\s+analysis\s*$",
+        # Real 10-K/10-Q headings are "Item 7. Management's Discussion and
+        # Analysis of Financial Condition and Results of Operations" -- the
+        # "of Financial Condition..." suffix is part of the standard heading,
+        # not optional narrative text, so it must be allowed here (it was
+        # previously required to end right after "analysis", which meant this
+        # section -- the single most signal-dense one in a filing -- was never
+        # actually detected). Filings also use a curly apostrophe (U+2019) from
+        # HTML-entity decoding, not the ASCII "'", hence the character class.
+        r"^\s*item\s*7\.?\s*management['’]s\s*discussion\s*and\s*analysis"
+        r"(\s*of\s*financial\s*condition\s*and\s*results\s*of\s*operations)?\s*$",
+        r"^\s*management['’]s\s+discussion\s+and\s+analysis"
+        r"(\s*of\s*financial\s*condition\s*and\s*results\s*of\s*operations)?\s*$",
         r"^\s*md&a\s*$",
     ),
     "Quantitative and Qualitative Disclosures About Market Risk": (
@@ -84,7 +94,7 @@ SECTION_PATTERNS: dict[str, tuple[str, ...]] = {
         r"^\s*notes\s*to\s*consolidated\s*financial\s*statements\s*$",
     ),
     "MD&A": (
-        r"^\s*management's\s+discussion\s+and\s+analysis\s*$",
+        r"^\s*management['’]s\s+discussion\s+and\s+analysis\s*$",
         r"^\s*md&a\s*$",
     ),
     "Market Risk": (
@@ -115,8 +125,11 @@ def safe_parse_date(value: Optional[str]) -> Optional[str]:
 
 
 def parse_filing_type(text: str) -> Optional[str]:
-    """Determine whether the filing is a 10-K/10-Q, if clearly stated."""
-    match = re.search(r"\b10-Q\b|\b10-K\b", text, flags=re.IGNORECASE)
+    """Determine whether the filing is a 10-K/10-Q/20-F, if clearly stated.
+
+    20-F is the annual report foreign private issuers file instead of a 10-K.
+    """
+    match = re.search(r"\b10-Q\b|\b10-K\b|\b20-F\b", text, flags=re.IGNORECASE)
     if not match:
         return None
 

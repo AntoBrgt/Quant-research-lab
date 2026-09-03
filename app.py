@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
@@ -23,8 +24,15 @@ import recommendations
 import research_engine
 import signal_extraction
 import strategy
+from portfolio_importers import detect, trade_republic
+from portfolio_importers.schema import reconstruct_positions
 
 MAX_AUTO_CHUNKS_PER_MISSING_TICKER = 10  # safety cap for on-demand extraction from the UI
+
+# Broker adapters keyed by what detect.detect_format() returns. Adding a new
+# broker: write its adapter module (see README "how to add a new broker
+# adapter"), add a branch to detect.detect_format(), and add it here.
+IMPORTERS = {"trade_republic": trade_republic}
 
 
 def _ensure_research_available(tickers: list[str]) -> dict:
@@ -33,6 +41,12 @@ def _ensure_research_available(tickers: list[str]) -> dict:
     This is step 6 of the workflow: a ticker 100 users already hold triggers
     zero new LLM calls here, because `signal_extraction` is cache-first and
     this function only ever calls it for tickers with nothing cached.
+
+    Each missing ticker gets its own chunk budget, run separately -- a single
+    combined call across several missing tickers would let one ticker (sorted
+    first alphabetically) exhaust the whole budget and starve the rest.
+    Tickers with no SEC documents at all (e.g. foreign filers not fetched via
+    fetch_edgar.py) simply produce zero chunks and are skipped, not an error.
     """
     if not config.DOCUMENTS_PATH.exists():
         return {"ran_extraction_for": [], "note": "No processed SEC documents available."}
@@ -45,16 +59,15 @@ def _ensure_research_available(tickers: list[str]) -> dict:
         return {"ran_extraction_for": []}
 
     docs = pd.read_parquet(config.DOCUMENTS_PATH)
-    new_signals, run_summary = signal_extraction.run_extraction(
-        docs, source="sec", tickers=missing, max_chunks=MAX_AUTO_CHUNKS_PER_MISSING_TICKER * len(missing),
-    )
+    run_summaries = {}
+    for ticker in missing:
+        new_signals, run_summary = signal_extraction.run_extraction(
+            docs, source="sec", tickers=[ticker], max_chunks=MAX_AUTO_CHUNKS_PER_MISSING_TICKER,
+        )
+        signal_extraction.save_signals(new_signals, config.SIGNALS_PATH)
+        run_summaries[ticker] = run_summary
 
-    if not new_signals.empty:
-        combined = pd.concat([existing_signals, new_signals], ignore_index=True) if not existing_signals.empty else new_signals
-        config.SIGNALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        combined.to_parquet(config.SIGNALS_PATH, index=False)
-
-    return {"ran_extraction_for": missing, "run_summary": run_summary}
+    return {"ran_extraction_for": missing, "run_summary": run_summaries}
 
 
 def analyze_portfolio(portfolio_df: pd.DataFrame, chosen_strategy: str, risk_profile: str) -> dict:
@@ -100,13 +113,82 @@ st.caption(
     "output with stated evidence, confidence, and data freshness -- not a promise of performance."
 )
 
-uploaded = st.file_uploader("Upload portfolio CSV (ticker, quantity, average_cost[, currency])", type="csv")
+st.header("1. Import a portfolio file")
+st.caption(
+    "Upload either a broker transaction export or a plain portfolio CSV (ticker, quantity, "
+    "average_cost[, currency]) -- the format is detected automatically from its columns, not "
+    "its filename."
+)
+import_upload = st.file_uploader(
+    "Upload CSV", type="csv", key="import_upload",
+    help="Only CSV is supported today -- a PDF broker statement will be rejected with a clear "
+    "message, not parsed.",
+)
+
+normalized_positions_df: Optional[pd.DataFrame] = None
+
+if import_upload is not None:
+    try:
+        import_df = pd.read_csv(import_upload)
+    except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        st.error(
+            f"Couldn't read this file as CSV ({type(exc).__name__}). If this is a PDF broker "
+            "statement, PDF parsing isn't supported yet -- please export a CSV from your broker "
+            "instead."
+        )
+        st.stop()
+
+    input_format = detect.detect_format(import_df)
+    st.write(f"**Detected format:** `{input_format}`")
+
+    if input_format == "trade_republic":
+        adapter = IMPORTERS["trade_republic"]
+        canonical_transactions, rejected_rows = adapter.parse(import_df)
+        n_trades = sum(1 for t in canonical_transactions if t.side in ("BUY", "SELL"))
+        n_other = len(canonical_transactions) - n_trades
+
+        st.write(
+            f"**Import validation:** {len(canonical_transactions)} row(s) accepted, "
+            f"{len(rejected_rows)} row(s) rejected "
+            f"(of {len(import_df)} total)."
+        )
+        if rejected_rows:
+            with st.expander(f"{len(rejected_rows)} rejected row(s) -- reasons"):
+                st.dataframe(pd.DataFrame(rejected_rows))
+
+        st.write(f"**Transactions:** {n_trades} trade (BUY/SELL), {n_other} non-trade (cash/dividend/other)")
+
+        positions = reconstruct_positions(canonical_transactions)
+        st.write(f"**Current positions:** {len(positions)}")
+
+        normalized_positions_df = pd.DataFrame([p.model_dump() for p in positions])
+        st.write("**Normalized portfolio:**")
+        st.dataframe(normalized_positions_df)
+
+    elif input_format == "canonical":
+        st.write(f"**Import validation:** already in the canonical portfolio format, {len(import_df)} row(s).")
+        st.write("**Normalized portfolio:**")
+        st.dataframe(import_df)
+
+    else:
+        st.error(
+            "Unrecognized CSV format -- doesn't match a supported broker export or the plain "
+            "portfolio CSV schema. See the README for supported formats and how to add a new "
+            "broker adapter."
+        )
+
+st.divider()
+st.header("2. Run analysis")
+st.caption("Uses the plain portfolio CSV format (ticker, quantity, average_cost[, currency]).")
+
+uploaded = st.file_uploader("Upload portfolio CSV (ticker, quantity, average_cost[, currency])", type="csv", key="analysis_upload")
 risk_profile = st.selectbox("Risk profile", ["conservative", "moderate", "aggressive"], index=1)
 chosen_strategy = st.selectbox("Strategy", ["short_term", "medium_term", "long_term"], index=1)
 run = st.button("Run analysis", type="primary", disabled=uploaded is None)
 
 if run and uploaded is not None:
     portfolio_df = pd.read_csv(uploaded)
+
     with st.spinner("Analyzing portfolio (only uncached tickers trigger new research)..."):
         result = analyze_portfolio(portfolio_df, chosen_strategy, risk_profile)
 

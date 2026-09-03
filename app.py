@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
@@ -21,6 +22,7 @@ import config
 import portfolio as portfolio_mod
 import recommendations
 import research_engine
+import security_master
 import signal_extraction
 import strategy
 from portfolio_importers import detect, trade_republic
@@ -69,7 +71,7 @@ def _ensure_research_available(tickers: list[str]) -> dict:
     return {"ran_extraction_for": missing, "run_summary": run_summaries}
 
 
-def import_and_prepare_portfolio(raw_df: pd.DataFrame) -> dict:
+def import_and_prepare_portfolio(raw_df: pd.DataFrame, ticker_overrides: Optional[dict[str, str]] = None) -> dict:
     """Detect format, normalize a broker export if needed, and validate.
 
     Pure Python, no Streamlit, no LLM, no network -- this is the one place a
@@ -87,6 +89,13 @@ def import_and_prepare_portfolio(raw_df: pd.DataFrame) -> dict:
     not just see a bare unrecognized ticker/ISIN string -- a bare string is not
     enough for the transparency this exists for. Nothing normalized is ever
     silently dropped; every problem row has its reason in `validation_errors`.
+
+    `ticker_overrides` (instrument_id -> ticker, e.g. from `resolve_unmapped_instruments()`)
+    lets a caller re-run this with resolved tickers substituted in, producing
+    ONE fully self-consistent report -- `validation_errors`/`unmapped_positions`
+    reflecting only what's *still* unresolved, not a stale pre-resolution
+    snapshot patched afterward. Only applies to the trade_republic path, which
+    is the only one with an `instrument_id` distinct from `ticker`.
     """
     empty_report = {
         "input_format": None, "transaction_count": None, "n_trades": None, "n_other": None,
@@ -117,6 +126,9 @@ def import_and_prepare_portfolio(raw_df: pd.DataFrame) -> dict:
         # two align positionally for the analyzable/unmapped split below).
         display_df = pd.DataFrame([p.model_dump() for p in positions])
         simple = to_simple_portfolio(positions)  # bridged ticker/quantity/average_cost/currency
+        if ticker_overrides:
+            override_ticker = display_df["instrument_id"].map(ticker_overrides)
+            simple["ticker"] = override_ticker.fillna(simple["ticker"])
     else:  # canonical -- already portfolio.py's own schema, nothing richer to show
         display_df = raw_df.copy()
         simple = raw_df.copy()
@@ -139,6 +151,46 @@ def import_and_prepare_portfolio(raw_df: pd.DataFrame) -> dict:
     report["unmapped_positions"] = display_df[~is_analyzable]  # rich view, for display only
     report["validation_errors"] = errors
     return report
+
+
+def resolve_unmapped_instruments(unmapped_positions: pd.DataFrame) -> dict:
+    """Attempt ISIN -> ticker resolution for unmapped positions via OpenFIGI.
+
+    Explicit and opt-in only -- never called automatically by
+    `import_and_prepare_portfolio()` or `analyze_portfolio()`, both of which
+    stay network-free. This is a real network call (rate-limited, see
+    `security_master.py`), so the UI gates it behind an unchecked-by-default
+    checkbox rather than running it on every analysis.
+
+    A resolved ticker is a best-effort match (see `security_master.py`'s
+    confidence levels) -- it is re-validated by `portfolio.validate_portfolio()`
+    just like any other ticker, and a resolution that doesn't actually have
+    price data will still show up honestly as "missing market data" downstream,
+    not as a silent success.
+    """
+    if unmapped_positions.empty:
+        return {"resolved_positions": pd.DataFrame(columns=["ticker", "quantity", "average_cost", "currency"]), "resolution_log": []}
+
+    isins = unmapped_positions["instrument_id"].astype(str).tolist()
+    resolutions = security_master.resolve_isins(isins)
+
+    resolved_rows: list[dict] = []
+    log: list[dict] = []
+    for _, row in unmapped_positions.iterrows():
+        isin = str(row["instrument_id"])
+        resolution = resolutions.get(isin)
+        if resolution and resolution.get("ticker"):
+            resolved_rows.append(
+                {"ticker": resolution["ticker"], "quantity": row["quantity"], "average_cost": row["average_cost"], "currency": row["currency"]}
+            )
+            log.append({"instrument_id": isin, "name": row.get("name"), "resolved_ticker": resolution["ticker"], "confidence": resolution["confidence"]})
+        else:
+            log.append({"instrument_id": isin, "name": row.get("name"), "resolved_ticker": None, "confidence": None})
+
+    return {
+        "resolved_positions": pd.DataFrame(resolved_rows, columns=["ticker", "quantity", "average_cost", "currency"]),
+        "resolution_log": log,
+    }
 
 
 def analyze_portfolio(portfolio_df: pd.DataFrame, chosen_strategy: str, risk_profile: str) -> dict:
@@ -197,6 +249,12 @@ uploaded = st.file_uploader(
 )
 risk_profile = st.selectbox("Risk profile", ["conservative", "moderate", "aggressive"], index=1)
 chosen_strategy = st.selectbox("Strategy", ["short_term", "medium_term", "long_term"], index=1)
+resolve_isins = st.checkbox(
+    "Also try to resolve unmapped instruments via ISIN lookup (OpenFIGI, free, requires network)",
+    value=False,
+    help="A resolved ticker is a best-effort match, not guaranteed to have real price/research "
+    "data -- one that doesn't will show up honestly as 'missing market data', not a silent success.",
+)
 run = st.button("Run analysis", type="primary", disabled=uploaded is None)
 
 if run and uploaded is not None:
@@ -212,12 +270,35 @@ if run and uploaded is not None:
 
     import_result = import_and_prepare_portfolio(raw_df)
 
-    st.header("2. Import summary")
-    st.write(f"**Detected format:** `{import_result['input_format']}`")
-
     if import_result["input_format"] == "unknown":
         st.error(import_result["validation_errors"][0])
         st.stop()
+
+    resolution_log: list[dict] = []
+    if resolve_isins and not import_result["unmapped_positions"].empty:
+        with st.spinner("Resolving unmapped instruments via OpenFIGI (ISIN lookup)..."):
+            resolution = resolve_unmapped_instruments(import_result["unmapped_positions"])
+        resolution_log = resolution["resolution_log"]
+
+        ticker_overrides = {r["instrument_id"]: r["resolved_ticker"] for r in resolution_log if r["resolved_ticker"]}
+        if ticker_overrides:
+            # Recompute ONE consistent report with resolved tickers substituted in --
+            # not a patch on top of the pre-resolution report, so validation_errors/
+            # unmapped_positions below reflect only what's still actually unresolved.
+            import_result = import_and_prepare_portfolio(raw_df, ticker_overrides=ticker_overrides)
+
+    st.header("2. Import summary")
+    st.write(f"**Detected format:** `{import_result['input_format']}`")
+
+    if resolution_log:
+        n_resolved = sum(1 for r in resolution_log if r["resolved_ticker"])
+        with st.expander(f"ISIN resolution results: {n_resolved}/{len(resolution_log)} resolved"):
+            st.dataframe(pd.DataFrame(resolution_log))
+        st.caption(
+            "A resolved ticker is a best-effort match, not guaranteed to have real research "
+            "coverage -- the warnings and unmapped list below already reflect resolution, so "
+            "anything still listed there genuinely couldn't be mapped, not just not-yet-tried."
+        )
 
     metric_cols = st.columns(4)
     if import_result["transaction_count"] is not None:

@@ -14,8 +14,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
 sys.path.insert(0, str(SRC_DIR))
+sys.path.insert(0, str(ROOT_DIR))  # so `import app` works (app.py lives at repo root, not src/)
 
 import cache  # noqa: E402
 import config  # noqa: E402

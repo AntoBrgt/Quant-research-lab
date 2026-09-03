@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
@@ -25,7 +24,7 @@ import research_engine
 import signal_extraction
 import strategy
 from portfolio_importers import detect, trade_republic
-from portfolio_importers.schema import reconstruct_positions
+from portfolio_importers.schema import reconstruct_positions, to_simple_portfolio
 
 MAX_AUTO_CHUNKS_PER_MISSING_TICKER = 10  # safety cap for on-demand extraction from the UI
 
@@ -68,6 +67,78 @@ def _ensure_research_available(tickers: list[str]) -> dict:
         run_summaries[ticker] = run_summary
 
     return {"ran_extraction_for": missing, "run_summary": run_summaries}
+
+
+def import_and_prepare_portfolio(raw_df: pd.DataFrame) -> dict:
+    """Detect format, normalize a broker export if needed, and validate.
+
+    Pure Python, no Streamlit, no LLM, no network -- this is the one place a
+    simple portfolio CSV and a supported broker export converge into the same
+    `ticker, quantity, average_cost, currency` shape `analyze_portfolio()`
+    already consumes unchanged. It does not call `analyze_portfolio()` itself,
+    so normalization stays fully separate from recommendation logic; the
+    caller decides whether/when to run analysis on the result.
+
+    `analyzable_positions` is `portfolio.validate_portfolio()`'s clean output --
+    this is what should be passed to `analyze_portfolio()`. `normalized_positions`
+    and `unmapped_positions` keep the richer canonical fields (name, asset_class,
+    instrument_id) where available, specifically so a user can tell *what* an
+    unmapped instrument actually is (e.g. "Core MSCI World USD (Acc), FUND"),
+    not just see a bare unrecognized ticker/ISIN string -- a bare string is not
+    enough for the transparency this exists for. Nothing normalized is ever
+    silently dropped; every problem row has its reason in `validation_errors`.
+    """
+    empty_report = {
+        "input_format": None, "transaction_count": None, "n_trades": None, "n_other": None,
+        "rejected_rows": [], "normalized_positions": pd.DataFrame(),
+        "analyzable_positions": pd.DataFrame(), "unmapped_positions": pd.DataFrame(),
+        "validation_errors": [],
+    }
+
+    input_format = detect.detect_format(raw_df)
+    report = {**empty_report, "input_format": input_format}
+
+    if input_format == "unknown":
+        report["validation_errors"] = [
+            "Unrecognized CSV format -- not a supported broker export or the plain portfolio CSV schema."
+        ]
+        return report
+
+    if input_format == "trade_republic":
+        adapter = IMPORTERS["trade_republic"]
+        canonical_transactions, rejected_rows = adapter.parse(raw_df)
+        report["transaction_count"] = len(raw_df)
+        report["n_trades"] = sum(1 for t in canonical_transactions if t.side in ("BUY", "SELL"))
+        report["n_other"] = len(canonical_transactions) - report["n_trades"]
+        report["rejected_rows"] = rejected_rows
+
+        positions = reconstruct_positions(canonical_transactions)
+        # Rich, display-oriented view (kept in the same order as `simple`, so the
+        # two align positionally for the analyzable/unmapped split below).
+        display_df = pd.DataFrame([p.model_dump() for p in positions])
+        simple = to_simple_portfolio(positions)  # bridged ticker/quantity/average_cost/currency
+    else:  # canonical -- already portfolio.py's own schema, nothing richer to show
+        display_df = raw_df.copy()
+        simple = raw_df.copy()
+        if "currency" not in simple.columns:
+            simple["currency"] = "USD"
+        if "currency" not in display_df.columns:
+            display_df["currency"] = "USD"
+
+    report["normalized_positions"] = display_df
+
+    if simple.empty:
+        report["analyzable_positions"] = simple
+        report["validation_errors"] = ["No current positions were found in this file."]
+        return report
+
+    clean, errors = portfolio_mod.validate_portfolio(simple)
+    is_analyzable = simple["ticker"].astype(str).str.strip().str.upper().isin(clean["ticker"]).to_numpy()
+
+    report["analyzable_positions"] = clean
+    report["unmapped_positions"] = display_df[~is_analyzable]  # rich view, for display only
+    report["validation_errors"] = errors
+    return report
 
 
 def analyze_portfolio(portfolio_df: pd.DataFrame, chosen_strategy: str, risk_profile: str) -> dict:
@@ -113,23 +184,24 @@ st.caption(
     "output with stated evidence, confidence, and data freshness -- not a promise of performance."
 )
 
-st.header("1. Import a portfolio file")
+st.header("1. Import your portfolio")
 st.caption(
     "Upload either a broker transaction export or a plain portfolio CSV (ticker, quantity, "
     "average_cost[, currency]) -- the format is detected automatically from its columns, not "
     "its filename."
 )
-import_upload = st.file_uploader(
-    "Upload CSV", type="csv", key="import_upload",
+uploaded = st.file_uploader(
+    "Upload CSV", type="csv", key="portfolio_upload",
     help="Only CSV is supported today -- a PDF broker statement will be rejected with a clear "
     "message, not parsed.",
 )
+risk_profile = st.selectbox("Risk profile", ["conservative", "moderate", "aggressive"], index=1)
+chosen_strategy = st.selectbox("Strategy", ["short_term", "medium_term", "long_term"], index=1)
+run = st.button("Run analysis", type="primary", disabled=uploaded is None)
 
-normalized_positions_df: Optional[pd.DataFrame] = None
-
-if import_upload is not None:
+if run and uploaded is not None:
     try:
-        import_df = pd.read_csv(import_upload)
+        raw_df = pd.read_csv(uploaded)
     except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
         st.error(
             f"Couldn't read this file as CSV ({type(exc).__name__}). If this is a PDF broker "
@@ -138,62 +210,55 @@ if import_upload is not None:
         )
         st.stop()
 
-    input_format = detect.detect_format(import_df)
-    st.write(f"**Detected format:** `{input_format}`")
+    import_result = import_and_prepare_portfolio(raw_df)
 
-    if input_format == "trade_republic":
-        adapter = IMPORTERS["trade_republic"]
-        canonical_transactions, rejected_rows = adapter.parse(import_df)
-        n_trades = sum(1 for t in canonical_transactions if t.side in ("BUY", "SELL"))
-        n_other = len(canonical_transactions) - n_trades
+    st.header("2. Import summary")
+    st.write(f"**Detected format:** `{import_result['input_format']}`")
 
-        st.write(
-            f"**Import validation:** {len(canonical_transactions)} row(s) accepted, "
-            f"{len(rejected_rows)} row(s) rejected "
-            f"(of {len(import_df)} total)."
-        )
-        if rejected_rows:
-            with st.expander(f"{len(rejected_rows)} rejected row(s) -- reasons"):
-                st.dataframe(pd.DataFrame(rejected_rows))
+    if import_result["input_format"] == "unknown":
+        st.error(import_result["validation_errors"][0])
+        st.stop()
 
-        st.write(f"**Transactions:** {n_trades} trade (BUY/SELL), {n_other} non-trade (cash/dividend/other)")
-
-        positions = reconstruct_positions(canonical_transactions)
-        st.write(f"**Current positions:** {len(positions)}")
-
-        normalized_positions_df = pd.DataFrame([p.model_dump() for p in positions])
-        st.write("**Normalized portfolio:**")
-        st.dataframe(normalized_positions_df)
-
-    elif input_format == "canonical":
-        st.write(f"**Import validation:** already in the canonical portfolio format, {len(import_df)} row(s).")
-        st.write("**Normalized portfolio:**")
-        st.dataframe(import_df)
-
+    metric_cols = st.columns(4)
+    if import_result["transaction_count"] is not None:
+        metric_cols[0].metric("Transaction rows", import_result["transaction_count"])
+        metric_cols[1].metric("Trade transactions", import_result["n_trades"])
     else:
-        st.error(
-            "Unrecognized CSV format -- doesn't match a supported broker export or the plain "
-            "portfolio CSV schema. See the README for supported formats and how to add a new "
-            "broker adapter."
+        metric_cols[0].metric("Input rows", len(raw_df))
+    metric_cols[2].metric("Current positions", len(import_result["normalized_positions"]))
+    metric_cols[3].metric("Analyzable positions", len(import_result["analyzable_positions"]))
+
+    if import_result["rejected_rows"]:
+        with st.expander(f"{len(import_result['rejected_rows'])} rejected transaction row(s) -- reasons"):
+            st.dataframe(pd.DataFrame(import_result["rejected_rows"]))
+
+    if import_result["validation_errors"]:
+        st.warning(
+            "Import/normalization warnings:\n\n"
+            + "\n".join(f"- {e}" for e in import_result["validation_errors"])
         )
 
-st.divider()
-st.header("2. Run analysis")
-st.caption("Uses the plain portfolio CSV format (ticker, quantity, average_cost[, currency]).")
+    st.write("**Normalized positions:**")
+    st.dataframe(import_result["normalized_positions"])
 
-uploaded = st.file_uploader("Upload portfolio CSV (ticker, quantity, average_cost[, currency])", type="csv", key="analysis_upload")
-risk_profile = st.selectbox("Risk profile", ["conservative", "moderate", "aggressive"], index=1)
-chosen_strategy = st.selectbox("Strategy", ["short_term", "medium_term", "long_term"], index=1)
-run = st.button("Run analysis", type="primary", disabled=uploaded is None)
+    if not import_result["unmapped_positions"].empty:
+        st.warning(
+            f"{len(import_result['unmapped_positions'])} position(s) are **not analyzable** "
+            "(unmapped/unsupported instrument or invalid data -- see warnings above) and are "
+            "excluded from recommendations below. They are not silently dropped: this is the "
+            "full list of what was found but couldn't be analyzed."
+        )
+        st.dataframe(import_result["unmapped_positions"])
 
-if run and uploaded is not None:
-    portfolio_df = pd.read_csv(uploaded)
+    if import_result["analyzable_positions"].empty:
+        st.error("No analyzable positions -- nothing to run recommendations on.")
+        st.stop()
+
+    st.divider()
+    st.header("3. Portfolio analysis")
 
     with st.spinner("Analyzing portfolio (only uncached tickers trigger new research)..."):
-        result = analyze_portfolio(portfolio_df, chosen_strategy, risk_profile)
-
-    if result["errors"]:
-        st.warning("Portfolio validation issues (invalid rows were dropped):\n\n" + "\n".join(f"- {e}" for e in result["errors"]))
+        result = analyze_portfolio(import_result["analyzable_positions"], chosen_strategy, risk_profile)
 
     enriched = result["enriched"]
     if enriched.empty:
@@ -206,6 +271,16 @@ if run and uploaded is not None:
         col2.metric("Positions", len(enriched))
         top_weight = result["concentration"].get("top_n_weight")
         col3.metric("Top 3 concentration", f"{top_weight:.0%}" if top_weight is not None else "n/a")
+
+        missing_price = enriched[enriched["current_price"].isna()]
+        if not missing_price.empty:
+            st.info(
+                f"**Missing market data** for {len(missing_price)} analyzable position(s) -- "
+                f"{sorted(missing_price['ticker'].tolist())}. These have a valid ticker shape but "
+                "no price could be fetched (e.g. delisted, wrong exchange suffix, or a temporary "
+                "data-provider gap). They still appear below with recommendations based on "
+                "research signals, just without P&L/weight numbers."
+            )
 
         if result["sectors"]["available"]:
             st.write("**Sector exposure**")
@@ -221,7 +296,10 @@ if run and uploaded is not None:
         st.subheader("Recommendations")
         for item in result["positions"]:
             rec = item["recommendation"]
-            with st.expander(f"{rec.ticker} -- {rec.action} (confidence {rec.confidence:.0%})"):
+            label = f"{rec.ticker} -- {rec.action} (confidence {rec.confidence:.0%})"
+            if rec.action == "INSUFFICIENT_EVIDENCE":
+                label = f"{rec.ticker} -- ⚠️ insufficient evidence for a recommendation"
+            with st.expander(label):
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Asset signal", f"{rec.asset_signal:.2f}" if rec.asset_signal is not None else "n/a")
                 c2.metric("Strategy fit", f"{rec.strategy_fit:.2f}" if rec.strategy_fit is not None else "n/a")
@@ -236,3 +314,5 @@ if run and uploaded is not None:
         extraction_note = result.get("extraction_note", {})
         if extraction_note.get("ran_extraction_for"):
             st.caption(f"Ran new research for previously-uncached tickers: {extraction_note['ran_extraction_for']}")
+        else:
+            st.caption("All analyzed tickers were already cached -- no new research/LLM calls were made.")

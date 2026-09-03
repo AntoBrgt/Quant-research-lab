@@ -184,7 +184,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Upload a portfolio CSV, pick a risk profile and strategy, and run analysis. Only tickers with no cached signals yet trigger new (cache-first) extraction -- everything else reuses shared research.
+Upload a portfolio CSV -- either the plain `ticker, quantity, average_cost` format or a supported broker export (see STEP 5) -- pick a risk profile and strategy, and run analysis. Only tickers with no cached signals yet trigger new (cache-first) extraction -- everything else reuses shared research.
 
 ## STEP 5 — Portfolio input normalization
 
@@ -237,8 +237,30 @@ Each adapter is one module in `src/portfolio_importers/` (e.g. `trade_republic.p
 
 ### Supported input formats today
 
-- **Trade Republic transaction export** (`src/portfolio_importers/trade_republic.py`)
+- **Trade Republic transaction export** (`src/portfolio_importers/trade_republic.py`) -- currently the *only* broker adapter
 - **Plain portfolio CSV** (`ticker, quantity, average_cost[, currency]`) -- `portfolio.py`'s original format, still fully supported, detected as `"canonical"`
+
+### The full input-to-recommendation flow
+
+`app.py`'s single upload widget drives both formats through one path (`import_and_prepare_portfolio()`), which stays separate from, but feeds directly into, the unchanged recommendation pipeline:
+
+```text
+Broker export ──┐
+                ├→ detect_format() → adapter.parse() → reconstruct_positions() → to_simple_portfolio() ──┐
+Simple CSV ─────┘                                                                                        │
+                                                                                                            ▼
+                                                                          portfolio.validate_portfolio()  (splits: analyzable / unmapped)
+                                                                                                            │
+                                                                                                            ▼
+                                                              portfolio.enrich_positions() → research_engine (cached, no LLM)
+                                                                                                            │
+                                                                                                            ▼
+                                                                              strategy.score_strategy_fit() → recommendations.generate_recommendation()
+```
+
+Positions that fail `validate_portfolio()` (most commonly: a fund/stock ISIN with no ticker mapping -- ISIN→ticker resolution is deliberately not implemented) are **never silently dropped**. They're shown in a separate "unmapped" table with their name and asset class (not just the raw ISIN), so the reason no recommendation exists for them is visible, not mysterious. Importantly: a real Trade Republic export's `symbol` column is an ISIN for every stock and fund position -- only crypto happens to already be ticker-shaped -- so **today, uploading a real Trade Republic export analyzes only crypto holdings**; every stock/fund position lands in the unmapped table until a ticker-mapping step is added (see limitations).
+
+The importer never triggers extra LLM calls: it only ever produces a `ticker, quantity, average_cost, currency` frame, and it's `_ensure_research_available()` (unchanged) that decides whether a ticker needs new research -- exactly the same cache-first check regardless of whether the ticker came from a plain CSV or a broker export.
 
 ### Architecture boundary
 
@@ -252,6 +274,6 @@ Recommendations are model outputs with stated evidence, confidence, and data fre
 - The news provider (`yfinance` headlines) is free and best-effort, not a real news feed -- coverage and quality will be thin for less-followed tickers.
 - Sector exposure depends on `yfinance`'s `info` payload, which is itself best-effort and can be missing per ticker.
 - Corporate actions (spin-offs, splits, mergers) are not modeled as position-changing events -- a `SPIN_OFF` row, for example, is preserved but never turns into a new position, and is rejected outright if it lacks a currency (observed on a real export).
-- The import-preview UI (README STEP 5) is intentionally not wired into the recommendation flow yet -- `schema.to_simple_portfolio()` is the ready-made bridge for connecting them.
 - Only one broker adapter exists today (Trade Republic); `detect.py`'s precedence logic for an ambiguous/overlapping schema between two future adapters is untested against a real second broker.
+- **No ISIN→ticker mapping means most of a real broker export is currently unanalyzable.** Validated against a real Trade Republic export: 15 reconstructed positions, only 1 (Bitcoin) was ticker-shaped enough to reach recommendations; the other 14 (every individual stock and fund) are correctly shown as unmapped rather than silently guessed, but that means zero actionable recommendations today for the stock/fund side of a typical real portfolio. This is the deliberate, documented tradeoff of not doing security-master resolution -- worth revisiting once there's an intentional decision on how to source ISIN→ticker mappings.
 

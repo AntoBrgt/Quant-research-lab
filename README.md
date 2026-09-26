@@ -377,7 +377,7 @@ Per-source staleness (price/fundamentals/institutional) against **horizon-depend
 
 ### Streamlit pages
 
-`app.py` is the front page: the Institutional Universe (choose horizon -> refresh 13F holdings and/or ingest reports -> explore/filter the universe by region/sector/theme/institution/direction -> pick a company). `pages/1_Company_Research.py` (overview, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) and `pages/2_Portfolio_Upload.py` (the original portfolio flow, functionally unchanged) follow in the sidebar.
+`app.py` is the front page, **Opportunities** (see STEP 8). `pages/1_Company_Research.py` (evidence verdict, live price chart, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) and `pages/2_Portfolio_Upload.py` (the original portfolio flow, functionally unchanged) follow in the sidebar.
 
 ### Is ML justified yet?
 
@@ -422,3 +422,17 @@ python src/ingest_institutional_research.py --13f        # 13F + parse any local
 or click **Refresh 13F holdings from SEC** on the front page. New 13Fs appear quarterly (mid-Feb/May/Aug/Nov), so a refresh a few times per quarter is plenty.
 
 **Limits**: filed up to 45 days after quarter end; long US equity positions only (no shorts, non-US holdings, or intra-quarter trades); amendments (13F-HR/A) ignored; a CUSIP change from a merger/reorganization looks like an exit + new position; split detection is a heuristic on filing-implied prices.
+
+## STEP 8 -- Automatic horizon ranking + live charts
+
+`streamlit run app.py`, pick a holding period, and the list is there -- no manual step:
+
+1. **13F auto-refresh**: if holdings were never fetched or are older than 7 days (`holdings_13f.needs_refresh`), the front page refreshes them and rebuilds the universe on load (once per session, so an SEC outage can't loop).
+2. **Ranking** (`src/screener.py`): every universe ticker goes through the *same* `research_engine.load_extended_research` the Company Research page uses, and is sorted by
+   `rank_score = horizon_weighted_view.score + 0.10 × institutional_direction_score`
+   -- no new scoring model, just the existing horizon-weighted fundamentals/technicals with a small, visible institutional tilt. Labels: `Strong` (≥0.30), `Favorable` (≥0.10), `Neutral`, `Unfavorable` (≤−0.10). **Shortlist** = Strong/Favorable + fresh data + not "Insufficient evidence". Rankings are cached per horizon per day in `data/processed/rankings/` (prices/fundamentals already cache ~20h), so switching horizons back and forth is instant after the first pass. Prices are pre-fetched sequentially (yfinance bulk download isn't thread-safe), the rest runs on 6 threads; a ticker that fails is ranked last with its error, never dropped silently.
+3. **Click a row** -> Company Research opens on that ticker with the horizon carried over.
+
+**Live chart** (`src/live_chart.py`): candles + SMA20/50/200, volume, RSI(14) (same definition as `market_features.compute_rsi`), with stop-loss/take-profit/support/resistance lines from `risk_reward.py`. The window follows the horizon -- ≤3 days: 5-minute bars over 5 days, auto-refreshing every 60s; ≤2 weeks: 30-minute bars; ≤3 months: 6 months daily; ≤2 years: 2 years daily; longer: 10 years weekly -- and can be switched manually. Bars come straight from Yahoo (typically ~15 min delayed intraday), are never written to the research price cache, and never feed the scoring.
+
+**Still true**: the ranking is a sort of the current evidence, not a return forecast. Nothing here has been validated against forward returns yet -- that backtest is the next step before trusting the labels with real size.

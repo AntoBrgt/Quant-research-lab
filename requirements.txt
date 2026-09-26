@@ -13,3 +13,4 @@ requests
 streamlit
 pytest
 pypdf
+plotly

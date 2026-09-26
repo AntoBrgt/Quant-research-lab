@@ -550,3 +550,18 @@ def mark_refreshed() -> None:
     marker = config.RAW_DATA_DIR / "13f" / "_last_refresh.txt"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+
+AUTO_REFRESH_MAX_AGE_DAYS = 7  # new 13Fs only appear quarterly; weekly is plenty
+
+
+def needs_refresh(max_age_days: int = AUTO_REFRESH_MAX_AGE_DAYS) -> bool:
+    """True if 13F data was never fetched, or the last refresh is older than `max_age_days`."""
+    last = last_refreshed_at()
+    if not last:
+        return True
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    return age.days >= max_age_days

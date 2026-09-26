@@ -1,16 +1,18 @@
-"""Streamlit front page: institutional universe -- section 16, steps 1-4.
+"""Streamlit front page: pick a horizon -> see the ranked opportunities.
 
-This is now the primary flow (moved from a secondary page) -- portfolio
-upload lives at pages/2_Portfolio_Upload.py for anyone who still wants it.
+Fully automatic flow:
+1. Choose a horizon (1 day .. 20 years).
+2. If the SEC 13F holdings are missing or older than a week, they're refreshed
+   automatically (no files to drop in, no LLM).
+3. Every company in the institutional universe is scored for that horizon
+   with the same pipeline as the Company Research page (fundamentals +
+   technicals + institutional activity, horizon-weighted) and ranked. Results
+   are cached per horizon per day, so switching back is instant.
+4. Click a row -> Company Research opens on that company, with live charts.
 
-This page only ever answers "why is this company in the universe" (which
-institutions mention it, which themes, what direction). It never computes or
-shows a BUY/SELL/HOLD verdict -- that's the Company Research page, and even
-there the institutional view stays one visible input, not the final word.
-
-Ingestion (parsing local reports, or fetching a user-supplied URL list) is
-explicit, opt-in, and cache-first here -- nothing on this page triggers LLM
-calls or network access just by being viewed.
+The labels (Strong / Favorable / Neutral / Unfavorable) describe where the
+current evidence leans for the chosen horizon. They are not return forecasts,
+and the method has not been backtested yet.
 """
 
 from __future__ import annotations
@@ -25,168 +27,194 @@ import streamlit as st
 
 import config
 import horizon
+import price_provider
+import screener
 from institutional_research import documents, holdings_13f, parser, providers, universe
 
-MAX_UI_CHUNKS_PER_RUN = 30  # safety cap for on-demand ingestion triggered from the UI
+MAX_UI_CHUNKS_PER_RUN = 30  # safety cap for on-demand report ingestion triggered from the UI
 
-st.set_page_config(page_title="Institutional Universe", layout="wide")
-st.title("Institutional Universe")
+st.set_page_config(page_title="Opportunities", layout="wide")
+st.title("Opportunities for your horizon")
 st.caption(
-    "Companies, sectors, and themes surfaced from institutional research reports. "
-    "This is institutional **context**, not a recommendation -- the project's own "
-    "research (fundamentals, technicals, historical evidence) is separate and lives "
-    "on the Company Research page."
+    "Companies held and traded by the largest institutions (SEC 13F), ranked by this project's own "
+    "fundamental + technical evidence for the horizon you pick. A ranking of evidence, not financial advice -- "
+    "the scoring has not been backtested yet."
 )
 
-# --- 1. Investment horizon (carries across pages via session_state) -----------
-st.header("1. Investment horizon")
+# --- Horizon ------------------------------------------------------------------
 horizon_label = st.select_slider(
-    "How long is your intended holding period?",
+    "Holding period",
     options=list(horizon.HORIZON_PRESETS.keys()),
-    value=st.session_state.get("horizon_label", "1 year"),
+    value=st.session_state.get("horizon_label", "6 months"),
 )
+horizon_days = horizon.HORIZON_PRESETS[horizon_label]
 st.session_state["horizon_label"] = horizon_label
-st.session_state["horizon_days"] = horizon.HORIZON_PRESETS[horizon_label]
-st.caption(f"Selected horizon: **{horizon_label}** ({st.session_state['horizon_days']} days). This carries over to Company Research.")
+st.session_state["horizon_days"] = horizon_days
 
-st.divider()
 
-# --- 2. Automatic source: SEC 13F holdings -------------------------------------
-st.header("2. Institutional holdings (SEC 13F, automatic)")
+def refresh_13f_and_universe(filers: dict) -> list[dict]:
+    new_13f, summaries = holdings_13f.refresh_13f_mentions(filers)
+    combined = holdings_13f.merge_13f_mentions(new_13f, config.INSTITUTIONAL_MENTIONS_PATH)
+    holdings_13f.mark_refreshed()
+    universe.build_universe(combined).to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
+    return summaries
+
+
+# --- Automatic data refresh ------------------------------------------------------
 filers = holdings_13f.load_filers()
-st.caption(
-    "Actual quarterly US-equity positions filed with the SEC by: **"
-    + ", ".join(filers)
-    + "**. No LLM, no manual files. Edit `data/raw/13f_filers.csv` (columns `institution, cik`) to change the list. "
-    "13Fs are filed up to 45 days after quarter end, long positions only -- a holding or an add is context, not a buy signal. "
-    "Adds/cuts are measured relative to each filer's median change, so index-fund inflows don't look like conviction."
-)
-last_13f = holdings_13f.last_refreshed_at()
-st.write(f"Last 13F refresh: **{last_13f or 'never'}**")
-if st.button("Refresh 13F holdings from SEC", type="primary" if not last_13f else "secondary"):
-    with st.spinner("Fetching latest 13F filings from SEC EDGAR, resolving tickers, rebuilding the universe (1-3 min)..."):
-        new_13f, summaries_13f = holdings_13f.refresh_13f_mentions(filers)
-        combined_mentions = holdings_13f.merge_13f_mentions(new_13f, config.INSTITUTIONAL_MENTIONS_PATH)
-        holdings_13f.mark_refreshed()
-        universe_df = universe.build_universe(combined_mentions)
-        universe_df.to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
-    st.dataframe(pd.DataFrame(summaries_13f), use_container_width=True)
-    if any(not str(s["status"]).startswith("ok") for s in summaries_13f):
-        st.warning("Some filers failed -- see the status column. The others were still saved.")
-    else:
-        st.success(f"{len(new_13f)} holding rows from {len(summaries_13f)} filers -> {len(universe_df)} companies in the universe.")
-
-st.divider()
-
-# --- 2b. Optional: research reports (explicit, opt-in, cache-first) -----------
-st.header("2b. Optional: ingest institutional research reports")
-st.caption(
-    f"Drop report files (.txt, .md, .pdf, .html) into `data/raw/institutional/<institution>/` "
-    f"(e.g. `data/raw/institutional/BlackRock/2026_outlook.pdf`), then parse them below. "
-    f"An optional `<file>.meta.json` sidecar can state the real title/date/URL exactly."
-)
-
-loaded_reports = documents.load_all_reports()
-st.write(f"**{len(loaded_reports)}** report file(s) found under `{config.INSTITUTIONAL_RAW_DIR}`.")
-
-col1, col2 = st.columns(2)
-with col1:
-    fetch_urls = st.checkbox(
-        "Also fetch reports from a URL list first (network, opt-in)",
-        value=False,
-        help=f"Downloads every not-yet-fetched URL in {config.INSTITUTIONAL_URL_LIST_PATH} "
-        "(columns: institution, report_title, url[, report_type, publication_date]). "
-        "Checks robots.txt and rate-limits per host. Never runs automatically.",
-    )
-with col2:
-    run_ingestion = st.button("Parse reports into the universe", type="primary", disabled=not loaded_reports and not fetch_urls)
-
-if run_ingestion:
-    if fetch_urls:
-        with st.spinner("Fetching reports from the URL list (network)..."):
-            fetch_results = providers.fetch_from_url_list()
-        st.dataframe(pd.DataFrame(fetch_results))
-        loaded_reports = documents.load_all_reports()
-
-    with st.spinner(f"Extracting institutional mentions (cache-first, up to {MAX_UI_CHUNKS_PER_RUN} new LLM calls)..."):
-        new_mentions, summary = parser.run_extraction(loaded_reports, max_chunks=MAX_UI_CHUNKS_PER_RUN)
-        combined_mentions = parser.save_mentions(new_mentions, config.INSTITUTIONAL_MENTIONS_PATH)
-        universe_df = universe.build_universe(combined_mentions)
-        universe_df.to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
-
-    st.success(
-        f"Processed {summary['chunks_processed']} chunk(s), {summary['llm_calls_made']} new LLM call(s) "
-        f"(rest served from cache) -> {summary['mentions_extracted']} new mention(s)."
-    )
-    if summary["llm_calls_skipped_over_limit"]:
-        st.warning(
-            f"{summary['llm_calls_skipped_over_limit']} chunk(s) were skipped this run "
-            "(MAX_UI_CHUNKS_PER_RUN reached) -- run again to continue them."
-        )
-
-st.divider()
-
-# --- 3 & 4. Explore + filter the universe --------------------------------------
-st.header("3. Explore the universe")
+if holdings_13f.needs_refresh() and not st.session_state.get("auto_13f_attempted"):
+    st.session_state["auto_13f_attempted"] = True  # once per session, even if SEC is down
+    with st.status("Updating institutional holdings from SEC 13F filings (first run: a few minutes)...", expanded=False) as status:
+        summaries = refresh_13f_and_universe(filers)
+        failed = [s for s in summaries if not str(s["status"]).startswith("ok")]
+        status.update(label=f"13F holdings updated ({len(summaries) - len(failed)}/{len(summaries)} institutions)", state="error" if failed else "complete")
+        st.dataframe(pd.DataFrame(summaries), use_container_width=True)
 
 mentions = pd.read_parquet(config.INSTITUTIONAL_MENTIONS_PATH) if config.INSTITUTIONAL_MENTIONS_PATH.exists() else pd.DataFrame()
 universe_df = pd.read_parquet(config.INSTITUTIONAL_UNIVERSE_PATH) if config.INSTITUTIONAL_UNIVERSE_PATH.exists() else pd.DataFrame()
 
 if universe_df.empty:
-    st.info(
-        "No universe built yet. Click **Refresh 13F holdings from SEC** above (automatic), and/or ingest "
-        "institutional reports -- the universe does not seed itself from any other tickers in this project."
+    st.error(
+        "No universe yet -- the automatic SEC 13F refresh didn't produce any companies. "
+        "Open **Data sources** below to retry and see per-institution errors."
     )
-    st.stop()
-
-with st.expander("Institutional themes (independent of whether a specific company was identified)"):
-    st.dataframe(universe.theme_summary(mentions), use_container_width=True)
-
-filter_cols = st.columns(4)
-region_filter = filter_cols[0].multiselect("Region", sorted(universe_df["region"].dropna().unique().tolist()))
-sector_filter = filter_cols[1].multiselect("Sector", sorted(universe_df["sector"].dropna().unique().tolist()))
-all_themes = sorted({t for themes in universe_df["themes"] for t in themes})
-theme_filter = filter_cols[2].multiselect("Theme", all_themes)
-direction_filter = filter_cols[3].multiselect("Institutional direction", sorted(universe_df["institutional_direction"].dropna().unique().tolist()))
-institution_options = sorted(mentions["institution"].dropna().unique().tolist()) if not mentions.empty else []
-institution_filter = st.multiselect("Held / mentioned by institution", institution_options)
-
-max_mentions = int(universe_df["institutional_mentions"].max())
-if max_mentions > 1:
-    min_mentions = st.slider("Minimum institutional mentions", 1, max_mentions, 1)
 else:
-    min_mentions = 1  # st.slider requires min < max; nothing to filter on with only one mention count present
+    # --- Ranking (cached per horizon per day) -----------------------------------
+    ranking = screener.load_cached_ranking(horizon_days, config.INSTITUTIONAL_UNIVERSE_PATH)
+    if ranking is None or st.session_state.pop("force_rerank", False):
+        bar = st.progress(0.0, text=f"Scoring {len(universe_df)} companies for a {horizon_label} horizon...")
+        ranking = screener.rank_universe(
+            universe_df, horizon_days, mentions,
+            prefetch=price_provider.get_price_history,
+            progress=lambda done, total, t: bar.progress(done / total, text=f"Scoring for {horizon_label}: {t} ({done}/{total})"),
+        )
+        bar.empty()
+        screener.save_ranking(ranking, horizon_days, config.INSTITUTIONAL_UNIVERSE_PATH)
 
-filtered = universe_df[universe_df["institutional_mentions"] >= min_mentions]
-if region_filter:
-    filtered = filtered[filtered["region"].isin(region_filter)]
-if sector_filter:
-    filtered = filtered[filtered["sector"].isin(sector_filter)]
-if theme_filter:
-    filtered = filtered[filtered["themes"].apply(lambda themes: any(t in themes for t in theme_filter))]
-if direction_filter:
-    filtered = filtered[filtered["institutional_direction"].isin(direction_filter)]
-if institution_filter:
-    tickers_for_institutions = set(mentions[mentions["institution"].isin(institution_filter)]["ticker"].dropna())
-    filtered = filtered[filtered["ticker"].isin(tickers_for_institutions)]
+    # --- Filters ------------------------------------------------------------------
+    fcols = st.columns([2, 2, 2, 1])
+    sector_filter = fcols[0].multiselect("Sector", sorted(ranking["sector"].dropna().unique().tolist()))
+    institution_options = sorted(mentions["institution"].dropna().unique().tolist()) if not mentions.empty else []
+    institution_filter = fcols[1].multiselect("Held / traded by", institution_options)
+    show = fcols[2].radio("Show", ["Shortlist", "All ranked"], horizontal=True)
+    if fcols[3].button("Re-score", help="Recompute the ranking now (prices/fundamentals are cached ~20h)"):
+        st.session_state["force_rerank"] = True
+        st.rerun()
 
-st.write(f"**{len(filtered)}** compan(ies) match the current filters.")
-st.dataframe(
-    filtered[["ticker", "company_name", "region", "sector", "market_cap", "themes", "institution_count", "institutional_mentions", "institutional_direction", "latest_mention_date"]],
-    use_container_width=True,
-)
+    view = ranking
+    if show == "Shortlist":
+        view = view[view["shortlisted"]]
+    if sector_filter:
+        view = view[view["sector"].isin(sector_filter)]
+    if institution_filter:
+        view = view[view["ticker"].isin(set(mentions[mentions["institution"].isin(institution_filter)]["ticker"].dropna()))]
+
+    n_short = int(ranking["shortlisted"].sum())
+    st.subheader(f"{len(view)} compan{'y' if len(view) == 1 else 'ies'} -- {horizon_label} horizon")
+    st.caption(
+        f"Shortlist = label Strong/Favorable, fresh data, and enough evidence ({n_short} of {len(ranking)} companies today). "
+        f"Score = horizon-weighted fundamentals/technicals (−1..+1) + {screener.INSTITUTIONAL_TILT:.2f} × institutional direction. "
+        "**Click a row** to open the full analysis with live charts."
+    )
+
+    table_cols = ["rank", "ticker", "company_name", "sector", "label", "rank_score", "technical_view", "fundamental_view",
+                  "institutional_view", "confidence", "current_price", "return_20d", "stop_loss", "take_profit",
+                  "risk_reward_ratio", "dominant_factors"]
+    event = st.dataframe(
+        view[table_cols].reset_index(drop=True),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"ranking_{horizon_days}_{show}",
+        column_config={
+            "rank": st.column_config.NumberColumn("#", width="small"),
+            "company_name": "Company",
+            "rank_score": st.column_config.ProgressColumn("Score", min_value=-1.0, max_value=1.0, format="%.2f"),
+            "technical_view": "Technical",
+            "fundamental_view": "Fundamental",
+            "institutional_view": "Institutions",
+            "current_price": st.column_config.NumberColumn("Price", format="$%.2f"),
+            "return_20d": st.column_config.NumberColumn("20D", format="percent"),
+            "stop_loss": st.column_config.NumberColumn("Stop", format="$%.2f"),
+            "take_profit": st.column_config.NumberColumn("Target", format="$%.2f"),
+            "risk_reward_ratio": st.column_config.NumberColumn("R/R", format="%.2f"),
+            "dominant_factors": "Driven by",
+        },
+    )
+    if event.selection.rows:
+        st.session_state["selected_ticker"] = view.iloc[event.selection.rows[0]]["ticker"]
+        st.switch_page("pages/1_Company_Research.py")
+
+    if show == "Shortlist" and view.empty:
+        st.info("Nothing passes the shortlist for this horizon right now -- switch to **All ranked** to see every company's score.")
+
+    failed = ranking[ranking["error"].notna()]
+    if not failed.empty:
+        with st.expander(f"{len(failed)} compan(ies) could not be scored"):
+            st.dataframe(failed[["ticker", "company_name", "error"]], use_container_width=True, hide_index=True)
 
 st.divider()
-st.header("4. Select a company")
-if filtered.empty:
-    st.caption("No companies match the current filters.")
-else:
-    selected = st.selectbox("Ticker", filtered["ticker"].tolist())
-    st.session_state["selected_ticker"] = selected
-    # A direct st.page_link to another page is fragile across Streamlit
-    # versions/entrypoints (it resolves paths relative to the app's actual
-    # entrypoint, which differs between a real `streamlit run app.py` session
-    # and this page tested/opened in isolation) -- session_state is the
-    # reliable hand-off, and the sidebar nav (always present in a multipage
-    # app) is the reliable way to actually navigate.
-    st.success(f"**{selected}** selected -- open **Company Research** from the sidebar to see its full research view.")
+
+# --- Data sources (automatic by default; manual controls here) ---------------------
+with st.expander("Data sources"):
+    st.markdown(
+        f"**SEC 13F holdings** -- {', '.join(filers)}. Refreshed automatically when older than "
+        f"{holdings_13f.AUTO_REFRESH_MAX_AGE_DAYS} days (last: {holdings_13f.last_refreshed_at() or 'never'}). "
+        "Edit `data/raw/13f_filers.csv` (`institution,cik`) to change the list. 13Fs are filed up to 45 days after "
+        "quarter end; adds/cuts are measured relative to each filer's median change."
+    )
+    if st.button("Refresh 13F holdings now"):
+        with st.spinner("Fetching latest 13F filings from SEC EDGAR..."):
+            summaries = refresh_13f_and_universe(filers)
+        st.dataframe(pd.DataFrame(summaries), use_container_width=True)
+        st.rerun()
+
+    if not mentions.empty:
+        st.markdown("**Institutional themes** (from ingested reports, independent of whether a company was identified)")
+        st.dataframe(universe.theme_summary(mentions), use_container_width=True)
+
+    st.markdown("**Optional: institutional research reports** (LLM-parsed outlooks, adds themes and extra mentions)")
+    st.caption(
+        f"Drop report files (.txt, .md, .pdf, .html) into `data/raw/institutional/<institution>/` "
+        f"(e.g. `data/raw/institutional/BlackRock/2026_outlook.pdf`), then parse them below. "
+        f"An optional `<file>.meta.json` sidecar can state the real title/date/URL exactly."
+    )
+
+    loaded_reports = documents.load_all_reports()
+    st.write(f"**{len(loaded_reports)}** report file(s) found under `{config.INSTITUTIONAL_RAW_DIR}`.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        fetch_urls = st.checkbox(
+            "Also fetch reports from a URL list first (network, opt-in)",
+            value=False,
+            help=f"Downloads every not-yet-fetched URL in {config.INSTITUTIONAL_URL_LIST_PATH} "
+            "(columns: institution, report_title, url[, report_type, publication_date]). "
+            "Checks robots.txt and rate-limits per host. Never runs automatically.",
+        )
+    with col2:
+        run_ingestion = st.button("Parse reports into the universe", type="primary", disabled=not loaded_reports and not fetch_urls)
+
+    if run_ingestion:
+        if fetch_urls:
+            with st.spinner("Fetching reports from the URL list (network)..."):
+                fetch_results = providers.fetch_from_url_list()
+            st.dataframe(pd.DataFrame(fetch_results))
+            loaded_reports = documents.load_all_reports()
+
+        with st.spinner(f"Extracting institutional mentions (cache-first, up to {MAX_UI_CHUNKS_PER_RUN} new LLM calls)..."):
+            new_mentions, summary = parser.run_extraction(loaded_reports, max_chunks=MAX_UI_CHUNKS_PER_RUN)
+            combined_mentions = parser.save_mentions(new_mentions, config.INSTITUTIONAL_MENTIONS_PATH)
+            universe_df = universe.build_universe(combined_mentions)
+            universe_df.to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
+
+        st.success(
+            f"Processed {summary['chunks_processed']} chunk(s), {summary['llm_calls_made']} new LLM call(s) "
+            f"(rest served from cache) -> {summary['mentions_extracted']} new mention(s)."
+        )
+        if summary["llm_calls_skipped_over_limit"]:
+            st.warning(
+                f"{summary['llm_calls_skipped_over_limit']} chunk(s) were skipped this run "
+                "(MAX_UI_CHUNKS_PER_RUN reached) -- run again to continue them."
+            )

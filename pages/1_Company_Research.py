@@ -20,7 +20,9 @@ import streamlit as st
 
 import config
 import horizon
+import live_chart
 import research_engine
+import screener
 
 st.set_page_config(page_title="Company Research", layout="wide")
 st.title("Company Research")
@@ -43,7 +45,7 @@ horizon_days = horizon.HORIZON_PRESETS[horizon_label]
 st.session_state["horizon_days"] = horizon_days
 
 if not ticker_input:
-    st.info("Enter a ticker, or pick one from the Institutional Universe page.")
+    st.info("Enter a ticker, or click a company on the Opportunities page.")
     st.stop()
 
 institutional_mentions = (
@@ -80,6 +82,82 @@ if freshness["status"] == "STALE":
     )
 else:
     st.caption(f"Data freshness: OK for a {horizon_label} horizon.")
+
+# --- Evidence verdict for this horizon (same scoring as the Opportunities ranking) ---
+hv_top = extended["horizon_weighted_view"]
+universe_path = config.INSTITUTIONAL_UNIVERSE_PATH
+inst_score = 0.0
+if universe_path.exists():
+    uni = pd.read_parquet(universe_path)
+    match = uni[uni["ticker"] == extended["ticker"]]
+    if not match.empty and pd.notna(match.iloc[0].get("institutional_direction_score")):
+        inst_score = float(match.iloc[0]["institutional_direction_score"])
+rank_score = None if hv_top["score"] is None else hv_top["score"] + screener.INSTITUTIONAL_TILT * inst_score
+verdict = screener.label_for(rank_score)
+cached_ranking = screener.load_cached_ranking(horizon_days, universe_path)
+rank_text = ""
+if cached_ranking is not None and extended["ticker"] in set(cached_ranking["ticker"]):
+    rank_text = f" -- ranked **#{int(cached_ranking.set_index('ticker').loc[extended['ticker'], 'rank'])} of {len(cached_ranking)}** in your universe"
+verdict_text = (
+    f"**Evidence for a {horizon_label} horizon: {verdict}**"
+    + (f" (score {rank_score:+.2f})" if rank_score is not None else "")
+    + rank_text
+    + f". Confidence: {confidence['level']}. Not a return forecast; not backtested yet."
+)
+{"Strong": st.success, "Favorable": st.success, "Unfavorable": st.error}.get(verdict, st.info)(verdict_text)
+
+# --- Live price chart -----------------------------------------------------------
+st.header("Price chart")
+default_window = live_chart.window_for_horizon(horizon_days)
+window_names = list(live_chart.WINDOW_CHOICES)
+default_name = next(
+    (n for n, w in live_chart.WINDOW_CHOICES.items() if (w.period, w.interval) == (default_window.period, default_window.interval)),
+    window_names[3],
+)
+ccols = st.columns([4, 1])
+window_name = ccols[0].radio("Window", window_names, index=window_names.index(default_name), horizontal=True,
+                             help="Defaults to the bars that matter for your horizon.")
+window = live_chart.WINDOW_CHOICES[window_name]
+auto_refresh = ccols[1].toggle("Live refresh", value=window.refresh_seconds is not None, disabled=window.refresh_seconds is None,
+                               help="Re-fetches intraday bars automatically. Daily/weekly windows don't need it.")
+
+_rr = extended["risk_reward"]
+_mf = extended["research"].get("market_features", {}) or {}
+chart_levels = {
+    "Stop loss": _rr["stop_loss"].get("level"),
+    "Take profit": _rr["take_profit"].get("level"),
+    "Support": _mf.get("support_60d"),
+    "Resistance": _mf.get("resistance_60d"),
+}
+show_levels = st.checkbox("Show stop / target / support / resistance", value=True)
+
+
+@st.fragment(run_every=window.refresh_seconds if (auto_refresh and window.refresh_seconds) else None)
+def render_price_chart() -> None:
+    try:
+        bars = live_chart.fetch_bars(ticker_input, window)
+    except Exception as exc:
+        st.warning(f"Could not fetch live bars for {ticker_input}: {exc}")
+        return
+    if bars.empty:
+        st.info("No bars returned for this window (market closed, or no intraday data for this ticker).")
+        return
+    last, first = bars["close"].iloc[-1], bars["close"].iloc[0]
+    mcols = st.columns(4)
+    mcols[0].metric("Last", f"${last:,.2f}", f"{(last / bars['close'].iloc[-2] - 1):+.2%} vs prev bar" if len(bars) > 1 else None)
+    mcols[1].metric("Window change", f"{(last / first - 1):+.1%}")
+    mcols[2].metric("Window high / low", f"${bars['high'].max():,.2f} / ${bars['low'].min():,.2f}")
+    mcols[3].metric("Last bar", pd.Timestamp(bars.index[-1]).strftime("%Y-%m-%d %H:%M"))
+    fig = live_chart.build_figure(bars, ticker_input, chart_levels if show_levels else None, intraday=window.intraday)
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        f"{window.description} · Yahoo Finance (intraday typically ~15 min delayed)"
+        + (f" · auto-refreshing every {window.refresh_seconds}s" if auto_refresh and window.refresh_seconds else "")
+        + ". SMAs and RSI are computed on the bars shown."
+    )
+
+
+render_price_chart()
 
 st.divider()
 

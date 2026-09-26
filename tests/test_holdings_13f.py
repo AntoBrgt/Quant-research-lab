@@ -226,3 +226,10 @@ def test_load_filers_defaults_and_csv(isolated_data):
     path.parent.mkdir(parents=True)
     path.write_text("institution,cik\nBerkshire Hathaway,1067983\n")
     assert h13f.load_filers() == {"Berkshire Hathaway": 1067983}
+
+
+def test_needs_refresh(isolated_data):
+    assert h13f.needs_refresh()
+    h13f.mark_refreshed()
+    assert not h13f.needs_refresh()
+    assert h13f.needs_refresh(max_age_days=0)

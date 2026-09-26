@@ -1,17 +1,22 @@
-"""Streamlit MVP: upload a portfolio, run analysis, see recommendations.
+"""Streamlit front page: institutional universe -- section 16, steps 1-4.
 
-This file only orchestrates -- every real computation (validation, position
-math, cache-first signal extraction, research aggregation, strategy scoring,
-recommendation generation) lives in `src/`. `analyze_portfolio()` takes the
-portfolio as a plain argument (never a module-level global), so the exact same
-function serves any number of portfolios.
+This is now the primary flow (moved from a secondary page) -- portfolio
+upload lives at pages/2_Portfolio_Upload.py for anyone who still wants it.
+
+This page only ever answers "why is this company in the universe" (which
+institutions mention it, which themes, what direction). It never computes or
+shows a BUY/SELL/HOLD verdict -- that's the Company Research page, and even
+there the institutional view stays one visible input, not the final word.
+
+Ingestion (parsing local reports, or fetching a user-supplied URL list) is
+explicit, opt-in, and cache-first here -- nothing on this page triggers LLM
+calls or network access just by being viewed.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
@@ -19,381 +24,137 @@ import pandas as pd
 import streamlit as st
 
 import config
-import portfolio as portfolio_mod
-import recommendations
-import research_engine
-import security_master
-import signal_extraction
-import strategy
-from portfolio_importers import detect, trade_republic
-from portfolio_importers.schema import reconstruct_positions, to_simple_portfolio
+import horizon
+from institutional_research import documents, parser, providers, universe
 
-MAX_AUTO_CHUNKS_PER_MISSING_TICKER = 10  # safety cap for on-demand extraction from the UI
+MAX_UI_CHUNKS_PER_RUN = 30  # safety cap for on-demand ingestion triggered from the UI
 
-# Broker adapters keyed by what detect.detect_format() returns. Adding a new
-# broker: write its adapter module (see README "how to add a new broker
-# adapter"), add a branch to detect.detect_format(), and add it here.
-IMPORTERS = {"trade_republic": trade_republic}
-
-
-def _ensure_research_available(tickers: list[str]) -> dict:
-    """Run cache-first extraction only for tickers with no signals at all yet.
-
-    This is step 6 of the workflow: a ticker 100 users already hold triggers
-    zero new LLM calls here, because `signal_extraction` is cache-first and
-    this function only ever calls it for tickers with nothing cached.
-
-    Each missing ticker gets its own chunk budget, run separately -- a single
-    combined call across several missing tickers would let one ticker (sorted
-    first alphabetically) exhaust the whole budget and starve the rest.
-    Tickers with no SEC documents at all (e.g. foreign filers not fetched via
-    fetch_edgar.py) simply produce zero chunks and are skipped, not an error.
-    """
-    if not config.DOCUMENTS_PATH.exists():
-        return {"ran_extraction_for": [], "note": "No processed SEC documents available."}
-
-    existing_signals = pd.read_parquet(config.SIGNALS_PATH) if config.SIGNALS_PATH.exists() else pd.DataFrame()
-    covered = set(existing_signals["ticker"].unique()) if not existing_signals.empty else set()
-    missing = [t for t in tickers if t.upper() not in covered]
-
-    if not missing:
-        return {"ran_extraction_for": []}
-
-    docs = pd.read_parquet(config.DOCUMENTS_PATH)
-    run_summaries = {}
-    for ticker in missing:
-        new_signals, run_summary = signal_extraction.run_extraction(
-            docs, source="sec", tickers=[ticker], max_chunks=MAX_AUTO_CHUNKS_PER_MISSING_TICKER,
-        )
-        signal_extraction.save_signals(new_signals, config.SIGNALS_PATH)
-        run_summaries[ticker] = run_summary
-
-    return {"ran_extraction_for": missing, "run_summary": run_summaries}
-
-
-def import_and_prepare_portfolio(raw_df: pd.DataFrame, ticker_overrides: Optional[dict[str, str]] = None) -> dict:
-    """Detect format, normalize a broker export if needed, and validate.
-
-    Pure Python, no Streamlit, no LLM, no network -- this is the one place a
-    simple portfolio CSV and a supported broker export converge into the same
-    `ticker, quantity, average_cost, currency` shape `analyze_portfolio()`
-    already consumes unchanged. It does not call `analyze_portfolio()` itself,
-    so normalization stays fully separate from recommendation logic; the
-    caller decides whether/when to run analysis on the result.
-
-    `analyzable_positions` is `portfolio.validate_portfolio()`'s clean output --
-    this is what should be passed to `analyze_portfolio()`. `normalized_positions`
-    and `unmapped_positions` keep the richer canonical fields (name, asset_class,
-    instrument_id) where available, specifically so a user can tell *what* an
-    unmapped instrument actually is (e.g. "Core MSCI World USD (Acc), FUND"),
-    not just see a bare unrecognized ticker/ISIN string -- a bare string is not
-    enough for the transparency this exists for. Nothing normalized is ever
-    silently dropped; every problem row has its reason in `validation_errors`.
-
-    `ticker_overrides` (instrument_id -> ticker, e.g. from `resolve_unmapped_instruments()`)
-    lets a caller re-run this with resolved tickers substituted in, producing
-    ONE fully self-consistent report -- `validation_errors`/`unmapped_positions`
-    reflecting only what's *still* unresolved, not a stale pre-resolution
-    snapshot patched afterward. Only applies to the trade_republic path, which
-    is the only one with an `instrument_id` distinct from `ticker`.
-    """
-    empty_report = {
-        "input_format": None, "transaction_count": None, "n_trades": None, "n_other": None,
-        "rejected_rows": [], "normalized_positions": pd.DataFrame(),
-        "analyzable_positions": pd.DataFrame(), "unmapped_positions": pd.DataFrame(),
-        "validation_errors": [],
-    }
-
-    input_format = detect.detect_format(raw_df)
-    report = {**empty_report, "input_format": input_format}
-
-    if input_format == "unknown":
-        report["validation_errors"] = [
-            "Unrecognized CSV format -- not a supported broker export or the plain portfolio CSV schema."
-        ]
-        return report
-
-    if input_format == "trade_republic":
-        adapter = IMPORTERS["trade_republic"]
-        canonical_transactions, rejected_rows = adapter.parse(raw_df)
-        report["transaction_count"] = len(raw_df)
-        report["n_trades"] = sum(1 for t in canonical_transactions if t.side in ("BUY", "SELL"))
-        report["n_other"] = len(canonical_transactions) - report["n_trades"]
-        report["rejected_rows"] = rejected_rows
-
-        positions = reconstruct_positions(canonical_transactions)
-        # Rich, display-oriented view (kept in the same order as `simple`, so the
-        # two align positionally for the analyzable/unmapped split below).
-        display_df = pd.DataFrame([p.model_dump() for p in positions])
-        simple = to_simple_portfolio(positions)  # bridged ticker/quantity/average_cost/currency
-        if ticker_overrides:
-            override_ticker = display_df["instrument_id"].map(ticker_overrides)
-            simple["ticker"] = override_ticker.fillna(simple["ticker"])
-    else:  # canonical -- already portfolio.py's own schema, nothing richer to show
-        display_df = raw_df.copy()
-        simple = raw_df.copy()
-        if "currency" not in simple.columns:
-            simple["currency"] = "USD"
-        if "currency" not in display_df.columns:
-            display_df["currency"] = "USD"
-
-    report["normalized_positions"] = display_df
-
-    if simple.empty:
-        report["analyzable_positions"] = simple
-        report["validation_errors"] = ["No current positions were found in this file."]
-        return report
-
-    clean, errors = portfolio_mod.validate_portfolio(simple)
-    is_analyzable = simple["ticker"].astype(str).str.strip().str.upper().isin(clean["ticker"]).to_numpy()
-
-    report["analyzable_positions"] = clean
-    report["unmapped_positions"] = display_df[~is_analyzable]  # rich view, for display only
-    report["validation_errors"] = errors
-    return report
-
-
-def resolve_unmapped_instruments(unmapped_positions: pd.DataFrame) -> dict:
-    """Attempt ISIN -> ticker resolution for unmapped positions via OpenFIGI.
-
-    Explicit and opt-in only -- never called automatically by
-    `import_and_prepare_portfolio()` or `analyze_portfolio()`, both of which
-    stay network-free. This is a real network call (rate-limited, see
-    `security_master.py`), so the UI gates it behind an unchecked-by-default
-    checkbox rather than running it on every analysis.
-
-    A resolved ticker is a best-effort match (see `security_master.py`'s
-    confidence levels) -- it is re-validated by `portfolio.validate_portfolio()`
-    just like any other ticker, and a resolution that doesn't actually have
-    price data will still show up honestly as "missing market data" downstream,
-    not as a silent success.
-    """
-    if unmapped_positions.empty:
-        return {"resolved_positions": pd.DataFrame(columns=["ticker", "quantity", "average_cost", "currency"]), "resolution_log": []}
-
-    isins = unmapped_positions["instrument_id"].astype(str).tolist()
-    resolutions = security_master.resolve_isins(isins)
-
-    resolved_rows: list[dict] = []
-    log: list[dict] = []
-    for _, row in unmapped_positions.iterrows():
-        isin = str(row["instrument_id"])
-        resolution = resolutions.get(isin)
-        if resolution and resolution.get("ticker"):
-            resolved_rows.append(
-                {"ticker": resolution["ticker"], "quantity": row["quantity"], "average_cost": row["average_cost"], "currency": row["currency"]}
-            )
-            log.append({"instrument_id": isin, "name": row.get("name"), "resolved_ticker": resolution["ticker"], "confidence": resolution["confidence"]})
-        else:
-            log.append({"instrument_id": isin, "name": row.get("name"), "resolved_ticker": None, "confidence": None})
-
-    return {
-        "resolved_positions": pd.DataFrame(resolved_rows, columns=["ticker", "quantity", "average_cost", "currency"]),
-        "resolution_log": log,
-    }
-
-
-def analyze_portfolio(portfolio_df: pd.DataFrame, chosen_strategy: str, risk_profile: str) -> dict:
-    """Pure orchestration: validate -> enrich -> research -> strategy -> recommend."""
-    clean, errors = portfolio_mod.validate_portfolio(portfolio_df)
-
-    extraction_note = _ensure_research_available(clean["ticker"].tolist()) if not clean.empty else {}
-
-    enriched = portfolio_mod.enrich_positions(clean) if not clean.empty else clean
-    concentration = portfolio_mod.portfolio_concentration(enriched) if not enriched.empty else {}
-    sectors = portfolio_mod.sector_exposure(enriched) if not enriched.empty else {"available": False, "exposure": {}}
-
-    holdings_weights = dict(zip(enriched.get("ticker", []), enriched.get("portfolio_weight", [])))
-    portfolio_context = {"holdings": holdings_weights}
-
-    position_results = []
-    for _, row in enriched.iterrows():
-        research = research_engine.load_company_research(row["ticker"])
-        fit = strategy.score_strategy_fit(research, chosen_strategy)
-        rec = recommendations.generate_recommendation(
-            row["ticker"], research, fit, portfolio_context, risk_profile, chosen_strategy,
-        )
-        position_results.append({"position": row.to_dict(), "research": research, "strategy_fit": fit, "recommendation": rec})
-
-    return {
-        "errors": errors,
-        "enriched": enriched,
-        "concentration": concentration,
-        "sectors": sectors,
-        "positions": position_results,
-        "extraction_note": extraction_note,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Streamlit UI
-# ---------------------------------------------------------------------------
-
-st.set_page_config(page_title="Quant Research Lab", layout="wide")
-st.title("Quant Research Lab -- Portfolio Analysis")
+st.set_page_config(page_title="Institutional Universe", layout="wide")
+st.title("Institutional Universe")
 st.caption(
-    "Research signal, not personalized financial advice. Every recommendation below is a model "
-    "output with stated evidence, confidence, and data freshness -- not a promise of performance."
+    "Companies, sectors, and themes surfaced from institutional research reports. "
+    "This is institutional **context**, not a recommendation -- the project's own "
+    "research (fundamentals, technicals, historical evidence) is separate and lives "
+    "on the Company Research page."
 )
 
-st.header("1. Import your portfolio")
+# --- 1. Investment horizon (carries across pages via session_state) -----------
+st.header("1. Investment horizon")
+horizon_label = st.select_slider(
+    "How long is your intended holding period?",
+    options=list(horizon.HORIZON_PRESETS.keys()),
+    value=st.session_state.get("horizon_label", "1 year"),
+)
+st.session_state["horizon_label"] = horizon_label
+st.session_state["horizon_days"] = horizon.HORIZON_PRESETS[horizon_label]
+st.caption(f"Selected horizon: **{horizon_label}** ({st.session_state['horizon_days']} days). This carries over to Company Research.")
+
+st.divider()
+
+# --- 2. Ingestion (explicit, opt-in, cache-first) ------------------------------
+st.header("2. Ingest institutional reports")
 st.caption(
-    "Upload either a broker transaction export or a plain portfolio CSV (ticker, quantity, "
-    "average_cost[, currency]) -- the format is detected automatically from its columns, not "
-    "its filename."
+    f"Drop report files (.txt, .md, .pdf, .html) into `data/raw/institutional/<institution>/` "
+    f"(e.g. `data/raw/institutional/BlackRock/2026_outlook.pdf`), then parse them below. "
+    f"An optional `<file>.meta.json` sidecar can state the real title/date/URL exactly."
 )
-uploaded = st.file_uploader(
-    "Upload CSV", type="csv", key="portfolio_upload",
-    help="Only CSV is supported today -- a PDF broker statement will be rejected with a clear "
-    "message, not parsed.",
-)
-risk_profile = st.selectbox("Risk profile", ["conservative", "moderate", "aggressive"], index=1)
-chosen_strategy = st.selectbox("Strategy", ["short_term", "medium_term", "long_term"], index=1)
-resolve_isins = st.checkbox(
-    "Also try to resolve unmapped instruments via ISIN lookup (OpenFIGI, free, requires network)",
-    value=False,
-    help="A resolved ticker is a best-effort match, not guaranteed to have real price/research "
-    "data -- one that doesn't will show up honestly as 'missing market data', not a silent success.",
-)
-run = st.button("Run analysis", type="primary", disabled=uploaded is None)
 
-if run and uploaded is not None:
-    try:
-        raw_df = pd.read_csv(uploaded)
-    except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
-        st.error(
-            f"Couldn't read this file as CSV ({type(exc).__name__}). If this is a PDF broker "
-            "statement, PDF parsing isn't supported yet -- please export a CSV from your broker "
-            "instead."
-        )
-        st.stop()
+loaded_reports = documents.load_all_reports()
+st.write(f"**{len(loaded_reports)}** report file(s) found under `{config.INSTITUTIONAL_RAW_DIR}`.")
 
-    import_result = import_and_prepare_portfolio(raw_df)
+col1, col2 = st.columns(2)
+with col1:
+    fetch_urls = st.checkbox(
+        "Also fetch reports from a URL list first (network, opt-in)",
+        value=False,
+        help=f"Downloads every not-yet-fetched URL in {config.INSTITUTIONAL_URL_LIST_PATH} "
+        "(columns: institution, report_title, url[, report_type, publication_date]). "
+        "Checks robots.txt and rate-limits per host. Never runs automatically.",
+    )
+with col2:
+    run_ingestion = st.button("Parse reports into the universe", type="primary", disabled=not loaded_reports and not fetch_urls)
 
-    if import_result["input_format"] == "unknown":
-        st.error(import_result["validation_errors"][0])
-        st.stop()
+if run_ingestion:
+    if fetch_urls:
+        with st.spinner("Fetching reports from the URL list (network)..."):
+            fetch_results = providers.fetch_from_url_list()
+        st.dataframe(pd.DataFrame(fetch_results))
+        loaded_reports = documents.load_all_reports()
 
-    resolution_log: list[dict] = []
-    if resolve_isins and not import_result["unmapped_positions"].empty:
-        with st.spinner("Resolving unmapped instruments via OpenFIGI (ISIN lookup)..."):
-            resolution = resolve_unmapped_instruments(import_result["unmapped_positions"])
-        resolution_log = resolution["resolution_log"]
+    with st.spinner(f"Extracting institutional mentions (cache-first, up to {MAX_UI_CHUNKS_PER_RUN} new LLM calls)..."):
+        new_mentions, summary = parser.run_extraction(loaded_reports, max_chunks=MAX_UI_CHUNKS_PER_RUN)
+        combined_mentions = parser.save_mentions(new_mentions, config.INSTITUTIONAL_MENTIONS_PATH)
+        universe_df = universe.build_universe(combined_mentions)
+        universe_df.to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
 
-        ticker_overrides = {r["instrument_id"]: r["resolved_ticker"] for r in resolution_log if r["resolved_ticker"]}
-        if ticker_overrides:
-            # Recompute ONE consistent report with resolved tickers substituted in --
-            # not a patch on top of the pre-resolution report, so validation_errors/
-            # unmapped_positions below reflect only what's still actually unresolved.
-            import_result = import_and_prepare_portfolio(raw_df, ticker_overrides=ticker_overrides)
-
-    st.header("2. Import summary")
-    st.write(f"**Detected format:** `{import_result['input_format']}`")
-
-    if resolution_log:
-        n_resolved = sum(1 for r in resolution_log if r["resolved_ticker"])
-        with st.expander(f"ISIN resolution results: {n_resolved}/{len(resolution_log)} resolved"):
-            st.dataframe(pd.DataFrame(resolution_log))
-        st.caption(
-            "A resolved ticker is a best-effort match, not guaranteed to have real research "
-            "coverage -- the warnings and unmapped list below already reflect resolution, so "
-            "anything still listed there genuinely couldn't be mapped, not just not-yet-tried."
-        )
-
-    metric_cols = st.columns(4)
-    if import_result["transaction_count"] is not None:
-        metric_cols[0].metric("Transaction rows", import_result["transaction_count"])
-        metric_cols[1].metric("Trade transactions", import_result["n_trades"])
-    else:
-        metric_cols[0].metric("Input rows", len(raw_df))
-    metric_cols[2].metric("Current positions", len(import_result["normalized_positions"]))
-    metric_cols[3].metric("Analyzable positions", len(import_result["analyzable_positions"]))
-
-    if import_result["rejected_rows"]:
-        with st.expander(f"{len(import_result['rejected_rows'])} rejected transaction row(s) -- reasons"):
-            st.dataframe(pd.DataFrame(import_result["rejected_rows"]))
-
-    if import_result["validation_errors"]:
+    st.success(
+        f"Processed {summary['chunks_processed']} chunk(s), {summary['llm_calls_made']} new LLM call(s) "
+        f"(rest served from cache) -> {summary['mentions_extracted']} new mention(s)."
+    )
+    if summary["llm_calls_skipped_over_limit"]:
         st.warning(
-            "Import/normalization warnings:\n\n"
-            + "\n".join(f"- {e}" for e in import_result["validation_errors"])
+            f"{summary['llm_calls_skipped_over_limit']} chunk(s) were skipped this run "
+            "(MAX_UI_CHUNKS_PER_RUN reached) -- run again to continue them."
         )
 
-    st.write("**Normalized positions:**")
-    st.dataframe(import_result["normalized_positions"])
+st.divider()
 
-    if not import_result["unmapped_positions"].empty:
-        st.warning(
-            f"{len(import_result['unmapped_positions'])} position(s) are **not analyzable** "
-            "(unmapped/unsupported instrument or invalid data -- see warnings above) and are "
-            "excluded from recommendations below. They are not silently dropped: this is the "
-            "full list of what was found but couldn't be analyzed."
-        )
-        st.dataframe(import_result["unmapped_positions"])
+# --- 3 & 4. Explore + filter the universe --------------------------------------
+st.header("3. Explore the universe")
 
-    if import_result["analyzable_positions"].empty:
-        st.error("No analyzable positions -- nothing to run recommendations on.")
-        st.stop()
+mentions = pd.read_parquet(config.INSTITUTIONAL_MENTIONS_PATH) if config.INSTITUTIONAL_MENTIONS_PATH.exists() else pd.DataFrame()
+universe_df = pd.read_parquet(config.INSTITUTIONAL_UNIVERSE_PATH) if config.INSTITUTIONAL_UNIVERSE_PATH.exists() else pd.DataFrame()
 
-    st.divider()
-    st.header("3. Portfolio analysis")
+if universe_df.empty:
+    st.info(
+        "No universe built yet. The universe is built **only** from institutional reports you "
+        "ingest above -- it does not seed itself from any other tickers in this project."
+    )
+    st.stop()
 
-    with st.spinner("Analyzing portfolio (only uncached tickers trigger new research)..."):
-        result = analyze_portfolio(import_result["analyzable_positions"], chosen_strategy, risk_profile)
+with st.expander("Institutional themes (independent of whether a specific company was identified)"):
+    st.dataframe(universe.theme_summary(mentions), use_container_width=True)
 
-    enriched = result["enriched"]
-    if enriched.empty:
-        st.error("No valid positions to analyze.")
-    else:
-        st.subheader("Portfolio overview")
-        total_value = enriched["market_value"].sum(skipna=True)
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total value", f"${total_value:,.0f}" if pd.notna(total_value) else "n/a")
-        col2.metric("Positions", len(enriched))
-        top_weight = result["concentration"].get("top_n_weight")
-        col3.metric("Top 3 concentration", f"{top_weight:.0%}" if top_weight is not None else "n/a")
+filter_cols = st.columns(4)
+region_filter = filter_cols[0].multiselect("Region", sorted(universe_df["region"].dropna().unique().tolist()))
+sector_filter = filter_cols[1].multiselect("Sector", sorted(universe_df["sector"].dropna().unique().tolist()))
+all_themes = sorted({t for themes in universe_df["themes"] for t in themes})
+theme_filter = filter_cols[2].multiselect("Theme", all_themes)
+direction_filter = filter_cols[3].multiselect("Institutional direction", sorted(universe_df["institutional_direction"].dropna().unique().tolist()))
 
-        missing_price = enriched[enriched["current_price"].isna()]
-        if not missing_price.empty:
-            st.info(
-                f"**Missing market data** for {len(missing_price)} analyzable position(s) -- "
-                f"{sorted(missing_price['ticker'].tolist())}. These have a valid ticker shape but "
-                "no price could be fetched (e.g. delisted, wrong exchange suffix, or a temporary "
-                "data-provider gap). They still appear below with recommendations based on "
-                "research signals, just without P&L/weight numbers."
-            )
+max_mentions = int(universe_df["institutional_mentions"].max())
+if max_mentions > 1:
+    min_mentions = st.slider("Minimum institutional mentions", 1, max_mentions, 1)
+else:
+    min_mentions = 1  # st.slider requires min < max; nothing to filter on with only one mention count present
 
-        if result["sectors"]["available"]:
-            st.write("**Sector exposure**")
-            st.bar_chart(pd.Series(result["sectors"]["exposure"]))
-        else:
-            st.caption("Sector exposure: unavailable for this data source.")
+filtered = universe_df[universe_df["institutional_mentions"] >= min_mentions]
+if region_filter:
+    filtered = filtered[filtered["region"].isin(region_filter)]
+if sector_filter:
+    filtered = filtered[filtered["sector"].isin(sector_filter)]
+if theme_filter:
+    filtered = filtered[filtered["themes"].apply(lambda themes: any(t in themes for t in theme_filter))]
+if direction_filter:
+    filtered = filtered[filtered["institutional_direction"].isin(direction_filter)]
 
-        st.subheader("Holdings")
-        st.dataframe(
-            enriched[["ticker", "quantity", "current_price", "market_value", "portfolio_weight", "unrealized_pl_pct", "sector"]]
-        )
+st.write(f"**{len(filtered)}** compan(ies) match the current filters.")
+st.dataframe(
+    filtered[["ticker", "company_name", "region", "sector", "market_cap", "themes", "institution_count", "institutional_mentions", "institutional_direction", "latest_mention_date"]],
+    use_container_width=True,
+)
 
-        st.subheader("Recommendations")
-        for item in result["positions"]:
-            rec = item["recommendation"]
-            label = f"{rec.ticker} -- {rec.action} (confidence {rec.confidence:.0%})"
-            if rec.action == "INSUFFICIENT_EVIDENCE":
-                label = f"{rec.ticker} -- ⚠️ insufficient evidence for a recommendation"
-            with st.expander(label):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Asset signal", f"{rec.asset_signal:.2f}" if rec.asset_signal is not None else "n/a")
-                c2.metric("Strategy fit", f"{rec.strategy_fit:.2f}" if rec.strategy_fit is not None else "n/a")
-                c3.metric("Portfolio fit", f"{rec.portfolio_fit:.2f}" if rec.portfolio_fit is not None else "n/a")
-                st.write(f"**Bull case:** {rec.bull_case}")
-                st.write(f"**Bear case:** {rec.bear_case}")
-                st.write(f"**Portfolio consideration:** {rec.portfolio_consideration}")
-                st.write("**Key signals:** " + "; ".join(rec.key_signals))
-                st.write("**Key risks:** " + "; ".join(rec.key_risks))
-                st.caption(f"Data freshness: {rec.data_freshness or 'unknown'}")
-
-        extraction_note = result.get("extraction_note", {})
-        if extraction_note.get("ran_extraction_for"):
-            st.caption(f"Ran new research for previously-uncached tickers: {extraction_note['ran_extraction_for']}")
-        else:
-            st.caption("All analyzed tickers were already cached -- no new research/LLM calls were made.")
+st.divider()
+st.header("4. Select a company")
+if filtered.empty:
+    st.caption("No companies match the current filters.")
+else:
+    selected = st.selectbox("Ticker", filtered["ticker"].tolist())
+    st.session_state["selected_ticker"] = selected
+    # A direct st.page_link to another page is fragile across Streamlit
+    # versions/entrypoints (it resolves paths relative to the app's actual
+    # entrypoint, which differs between a real `streamlit run app.py` session
+    # and this page tested/opened in isolation) -- session_state is the
+    # reliable hand-off, and the sidebar nav (always present in a multipage
+    # app) is the reliable way to actually navigate.
+    st.success(f"**{selected}** selected -- open **Company Research** from the sidebar to see its full research view.")

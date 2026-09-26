@@ -279,3 +279,115 @@ Recommendations are model outputs with stated evidence, confidence, and data fre
   - A "high confidence" resolution means OpenFIGI matched a US-exchange listing -- it does **not** mean the ticker is a liquid, well-known one. Several resolved to obscure OTC pink-sheet symbols (e.g. Siemens → `SMAWF`, Schneider Electric → `SBGSF`, BNP Paribas → `BNPQF`) rather than the sponsored ADR tickers a person would recognize.
   - **The resolved *price* ticker and the ticker any existing *SEC research* is cached under can differ**, and did: OpenFIGI resolved Sony to `SNEJF` (an unsponsored OTC quote), but this project's actual cached Sony research is under `SONY` (the sponsored ADR, the one with real 20-F filings). Resolving an ISIN makes a position priceable; it does not automatically connect it to the right research, and in this case it silently wouldn't have without a human noticing the mismatch. Only the 5 resolved tickers that happened to exactly match already-cached research (`GOOGL`, `V`, `NVDA`, `KO`, `RACE`) produced a real recommendation; the other 10 -- including Sony under the wrong ticker -- correctly showed `INSUFFICIENT_EVIDENCE` rather than a wrong answer, but for a subtler reason than "no data exists" in Sony's case. This is a real open question (should price-ticker resolution and research-ticker resolution be the same lookup?), not yet resolved.
 
+## STEP 6 -- Institutional universe + horizon-aware research engine
+
+A second, independent product surface alongside the portfolio flow above (portfolio upload is untouched and out of scope for this step). The direction:
+
+```text
+Institutional research reports -> institutional universe -> Streamlit
+    -> user picks a horizon (1 day .. 20 years)
+    -> fundamental + technical + institutional + historical evidence
+    -> risk/reward framework -> research view
+```
+
+Institutional reports are treated as **one input for discovering themes, sectors, and companies** -- never as a source of BUY/SELL instructions, and never blindly copied. The project's own fundamental/technical/historical evidence remains the independent evaluation layer.
+
+### Institutional research ingestion (`src/institutional_research/`)
+
+```text
+data/raw/institutional/<institution>/<report>.{txt,md,pdf,html}   (local files, or fetched via providers.py)
+    -> documents.py   load + extract plain text + report metadata (with an optional <file>.meta.json sidecar override)
+    -> parser.py      cache-first LLM extraction -> InstitutionalMention rows (institution, theme, region,
+                       sector, company/ticker, institutional_view, view_direction, confidence, evidence)
+    -> universe.py    aggregate mentions -> per-ticker universe (institution_count, themes, institutional_direction, ...)
+```
+
+Two ways to get reports in, both explicit and opt-in:
+1. **Local files** (recommended default) -- drop files into `data/raw/institutional/<institution>/`, same layout as `data/raw/edgar/`.
+2. **A user-supplied URL list** (`data/raw/institutional_urls.csv`, columns `institution, report_title, url[, report_type, publication_date]`) -- fetched only via an explicit action (`--fetch-urls` on the CLI, or the checkbox on the Universe page), checking `robots.txt` and rate-limiting per host. This is **not** a crawler -- it only ever fetches exact URLs a human listed.
+
+`parser.py` reuses `signal_extraction.build_llm()`, `cache.py`, `llm_usage.py`, and `process_documents.split_into_chunks()` directly rather than reimplementing the cache-first/hang-guard/runaway-cap machinery a second time -- same cache keying, same `LLM_REQUEST_TIMEOUT_SECONDS`, same idea as `MAX_SIGNALS_PER_CHUNK` (here `MAX_MENTIONS_PER_CHUNK`), separate cache namespace (`institutional_mentions`) and schema.
+
+**A mention is never a recommendation.** "We favor European financials" becomes `region=Europe, sector=Financials, view_direction=POSITIVE` -- not "BUY BNP" -- enforced both in the extraction prompt and structurally (`InstitutionalMention` has no action/rating field at all). `view_direction` is `POSITIVE | NEUTRAL | NEGATIVE | MENTIONED`; `confidence` is categorical (`High/Medium/Low`), not a float, for the same reason `Recommendation.confidence` elsewhere in this project is never presented as a probability.
+
+**The universe is built only from ingested institutional reports** -- it does not seed itself from any other ticker already known to the project (e.g. the 3 tickers used to test the SEC pipeline). No reports ingested yet means an empty universe, by design, not a bug.
+
+Run it:
+```bash
+python src/ingest_institutional_research.py --dry-run              # what would be processed, no LLM calls
+python src/ingest_institutional_research.py --max-chunks 20        # cost-controlled test run
+python src/ingest_institutional_research.py --fetch-urls           # opt-in: also download the URL list first
+```
+
+`universe.build_universe()` only includes rows that resolved to a `ticker` -- a theme/sector-only mention (no identifiable company) is real context, surfaced separately via `universe.theme_summary()`, not a security this project can price or run fundamentals on. **Separation is structural, not just documentation**: `institutional_research/` only ever answers "why is this company in the universe"; it has no code path that produces a research verdict.
+
+### Fundamentals (`src/fundamentals.py`)
+
+No LLM anywhere in this module; deterministic Python throughout. Same provider shape as `price_provider.py`/`news_provider.py` (a `Protocol`, a free `yfinance`-backed implementation, a disk cache at `data/raw/fundamentals/<ticker>.json`, 20h TTL), with three layers on top:
+
+1. **`MetricObservation`** -- every metric (revenue, margins, EPS, FCF, ROE, ROIC, leverage, ...) is a chronological list of period-by-period observations, each carrying `period` (e.g. `"FY2025"`), `period_type` (`annual`/`ttm`/`forward`), `is_estimate`, `source`, and `retrieved_at` -- not a single latest scalar, and never mixing a TTM figure into an annual series. `total_debt`/`net_debt`/`leverage` are explicitly current-snapshot-only (yfinance has no reliable historical `total_debt` line item) rather than fabricating a fake historical series by pairing today's debt with past years' cash/equity.
+2. **Data-quality validation** (`validate_observations`) -- flags (never deletes) impossible margins, implausible ratios, implausible coverage, extreme growth, invalid/future dates, duplicate periods, and statistical outliers, each with its own calibrated bound (a >150% ROE from a buyback-heavy balance sheet, or 30x interest coverage from a well-capitalized large-cap, are real and must not be flagged the same way a >150% *margin* would be -- validated directly against 8 real companies across 7 sectors, see below).
+3. **`classify_trend()`** -- a deterministic `IMPROVING`/`STABLE`/`DETERIORATING`/`INSUFFICIENT_DATA` state per factor, from the real multi-period series (not a single-point comparison). Descriptive only -- there is no fundamental score and no BUY/SELL output anywhere in this module.
+
+`compute_fundamentals(ticker)` returns the flat output schema (`CompanyFundamentals.model_dump()`): growth, profitability, balance sheet, cash generation, and valuation fields plus their trend states, `observation_date` (the underlying reporting period) separate from `data_freshness` (cache retrieval time), `data_quality` (aggregated flags), `sources`, and the full `history` every derived field is read off of. Different sectors don't get every field forced onto them -- a bank correctly has no `gross_margin`/`operating_margin`/`ev_ebitda` (no comparable statement line items via this data source), rather than a guessed value.
+
+### Technical analysis (`src/market_features.py` + `src/technicals.py`)
+
+`market_features.py` stays the low-level, `as_of`-gated, no-look-ahead-tested layer (returns, volatility, RSI, moving averages, ATR, volume ratio, swing support/resistance) -- unchanged in this pass, and still what `strategy.py`'s three horizon buckets read directly. `technicals.py` is a new layer on top, built to the same standard as `fundamentals.py`, reusing `market_features.py`'s functions rather than reimplementing them:
+
+- **Historical series with provenance**: `TechnicalObservation` -- close, SMA20/50, RSI14, ATR14, and 20-day volatility as chronological, dated series (~3 months of trading days), not just the latest value, each carrying `source`/`retrieved_at`.
+- **Returns**: 1D/5D/20D/60D/120D/252D, each backed by a `ReturnObservation` (start date, end date, value, and whether the horizon actually had enough history -- an incomplete horizon is `None`, never silently substituted with another window).
+- **Moving averages/trend**: SMA20/50/100/200, `price_vs_ma*`, `ma20_vs_ma50`, `ma50_vs_ma200`, and a `trend` state (`BULLISH`/`BEARISH`/`MIXED`/`INSUFFICIENT_DATA`) from price-vs-SMA50-vs-SMA200 relationships -- descriptive only, never a recommendation (a `BULLISH` trend is not a BUY signal).
+- **Momentum**: RSI14 plus `rsi_state` (`OVERBOUGHT`/`NEUTRAL`/`OVERSOLD`), and a separate `momentum_state` from the direction of the 20D/60D/252D returns.
+- **Volatility**: 20-day and 60-day annualized volatility, ATR14 and ATR14-as-%-of-price, and a `volatility_regime` (`LOW`/`NORMAL`/`HIGH`) computed relative to *that security's own* trailing volatility distribution (tercile split) rather than one fixed universal threshold -- "high volatility" means something different for a utility than a semiconductor, and this project has no cross-sectional universe yet to derive a shared threshold from.
+- **Volume**: 20-day average volume, volume-vs-average, and a `volume_trend` (`INCREASING`/`STABLE`/`DECREASING`) that directly reuses `fundamentals.classify_trend()`'s deterministic delta logic (relabeled, not reimplemented).
+- **Relative strength**: 20D/60D/252D stock return minus benchmark return, both kept individually visible. **Benchmark: SPY** (SPDR S&P 500 ETF) -- no benchmark convention existed anywhere in this project before this; SPY was chosen as a broad, liquid, freely-available-via-`yfinance` US-equity proxy appropriate for this project's largely US-large-cap universe today, fetched through the same cached `price_provider`. A failed benchmark fetch means missing relative-strength fields, never a silently skipped calculation.
+- **Support/resistance**: the same 60-day swing-high/low methodology as `market_features.compute_swing_levels` (kept under both names -- `support_60d`/`resistance_60d` for `risk_reward.py`'s existing usage, `nearest_support`/`nearest_resistance`/`distance_to_*_pct` as this layer's own names for the identical computation).
+- **Data quality**: OHLCV validation flags structural impossibilities (`high < low`, close outside the high/low range, negative price/volume, duplicate/unsorted dates, insufficient history) as `INVALID_DATA`, and distinguishes a large single-day move that's corroborated by a volume spike (`VALID_EXTREME_MARKET_MOVE`) from one that isn't (`SUSPICIOUS_DATA`) -- a real crash or rally is not treated as a data error. Nothing is ever silently dropped.
+- **Freshness/provenance**: `data_source`, `retrieved_at`, `history_start`/`history_end`, `as_of`.
+
+**Price convention**: every indicator uses `adj_close`. `price_provider.py` now downloads with `auto_adjust=True` so `open`/`high`/`low`/`adj_close` are all the *same* fully split/dividend-adjusted series -- this replaced an earlier `auto_adjust=False` approach that paired an adjusted Close with raw High/Low, which real-data validation on JPM caught silently producing `close_below_low` on every row following a dividend adjustment (adjusted Close drifting below the still-raw Low). There is no separate raw/unadjusted series kept anywhere in this project now, so there is nothing left to mix.
+
+`research_engine.load_extended_research()` merges `technicals.compute_technicals()`'s flat output into `research["market_features"]` (an additive superset -- every key `horizon.py`/`risk_reward.py`/`strategy.py`/`component_views` already read keeps its exact name and value), so the new fields are available to the horizon-aware research page with zero changes required to those modules.
+
+### Numeric horizon + horizon-aware scoring (`src/horizon.py`)
+
+`strategy.py`'s three buckets (`short_term`/`medium_term`/`long_term`) are untouched and still serve the portfolio flow. `horizon.py` has two complementary layers, both kept:
+
+- **`score_horizon_fit()`** (unchanged) -- the continuous generalization: `horizon_days` blends ~15 individually-weighted raw signal/technical/fundamental fields from 4 log-interpolated anchor profiles (1 day / 30 days / 1 year / 10 years).
+- **`compute_horizon_weighted_view()`** (new) -- a coarser, more directly explainable layer for "why does this horizon differ from that one": **5 transparent profiles** (`VERY_SHORT`/`SHORT`/`MEDIUM`/`LONG`/`VERY_LONG`, covering every named preset from "1 day" to "20 years") each weighting **10 named component groups** (5 technical: trend, momentum, volatility, volume, relative strength; 5 fundamental: growth, profitability, cash flow, balance sheet, valuation). Each profile's weights sum to 1.0 (`test_horizon.py`); technical weight runs 0.85 → 0.70 → 0.50 → 0.25 → 0.10 from `VERY_SHORT` to `VERY_LONG` (fundamental weight is the mirror image) -- validated directly on AAPL/JPM/NEE: technical factors (momentum, trend, volume) dominate every ticker's `dominant_factors` at a 1-day horizon, fundamental factors (profitability, growth, cash flow) dominate at 10 years, for all three regardless of company. A missing group (e.g. a company with no resolvable technicals) is **excluded and the remaining weights renormalize** -- it is never treated as a negative signal or padded with a zero (`test_missing_group_is_excluded_not_treated_as_negative`). The output stays a set of named, inspectable components (`components`, `technical_contribution`, `fundamental_contribution`, `dominant_factors`) -- never one opaque score -- and, like every other layer in this project, it is descriptive research weighting, not a BUY/SELL recommendation or a return/probability prediction. `research_engine.load_extended_research()` exposes it as `horizon_weighted_view`, alongside the untouched `horizon_fit`.
+
+Either way, the same company can score positively at one horizon and negatively at another if the underlying evidence actually points that way -- verified directly in `test_horizon.py`. Every weight is a plain, readable module-level dict; there is no single hardcoded scoring formula.
+
+### Risk/reward framework (`src/risk_reward.py`)
+
+Horizon decides the *methodology*, not just the numbers:
+- **Short/medium horizons**: an ATR-based (or recent-swing-low) technical stop, a swing-high/risk-multiple technical target, a numeric `risk_reward_ratio`.
+- **Long horizons (>~2 years)**: no tight technical stop -- instead a **thesis invalidation** description (referencing the company's actual current revenue growth/margin, not a template) and an explicit **"No fixed take-profit -- thesis/valuation based exit"**, consistent with this project's existing rule that it never fabricates a price target.
+
+`stop_loss`/`take_profit` always carry a `type` (`technical` vs `thesis_invalidation`/`none`) so the two are never confused with each other.
+
+### Data freshness (`research_engine.assess_data_freshness`)
+
+Per-source staleness (price/fundamentals/institutional) against **horizon-dependent** thresholds -- a 5-day-old price is disqualifying for a 1-day horizon and irrelevant for a 10-year one; a 300-day-old institutional report is the reverse. One overall `OK`/`STALE` flag per horizon, not one global threshold.
+
+### Company research composition (`research_engine.load_extended_research` / `component_views` / `research_confidence`)
+
+`load_extended_research(ticker, horizon_days)` composes (never recomputes) `load_company_research`, `fundamentals.py`, `institutional_research.universe.why_in_universe`, `horizon.py`, and `risk_reward.py` into one object for the company-research page -- read-only and cache-first throughout, same "no new LLM extraction just from viewing a company" contract as the rest of the app. `component_views()` derives independent `POSITIVE/NEUTRAL/NEGATIVE/INSUFFICIENT_EVIDENCE` labels for fundamental, technical, and institutional evidence -- **kept separate on purpose** (section 21's "no opaque AI score"); they are allowed to disagree, and the UI shows that disagreement rather than averaging it away. `research_confidence()` is evidence quality/agreement (`High/Medium/Low/Insufficient evidence`), explicitly **not** a probability of return.
+
+### Streamlit pages
+
+`pages/1_Institutional_Universe.py` (choose horizon -> ingest reports -> explore/filter the universe by region/sector/theme/institution/direction -> pick a company) and `pages/2_Company_Research.py` (overview, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) -- both additive; `app.py`'s existing portfolio flow is unchanged.
+
+### Is ML justified yet?
+
+**No.** The universe today has as many companies as there are institutional mentions ingested (potentially zero until reports are supplied), there is no historical label set free of look-ahead bias, and no backtesting harness yet exists to check a model against a baseline out-of-sample. The deterministic baseline above (fundamentals + technicals + institutional context + historical signal evidence, horizon-weighted) is the whole system for now, by design -- see brief section 10's explicit conditions, none of which are close to satisfied yet.
+
+### Known gaps in this pass
+
+- No live webpage rendering/scraping for institutional reports -- PDF/HTML/text files only (a user saves a webpage first, same as `data/raw/edgar/` is pre-fetched rather than scraped live).
+- Region is derived from `yfinance`'s `country` field via a small hand-written lookup table, not an authoritative geography source.
+- `roic` and `interest_coverage` are always `None` -- no reliable free-data field/derivation found yet.
+- No backtesting/evaluation harness yet (brief section 20) -- the risk/reward and horizon-fit methodology is not yet validated against historical forward returns.
+- Support/resistance is a simple 60-day swing high/low, not a statistically fitted level.
+

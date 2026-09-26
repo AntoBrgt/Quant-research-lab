@@ -4,16 +4,28 @@ No network, no LLM, no Ollama. Price/sector lookups and research are faked at
 the module boundary (`portfolio.price_provider`, `app.research_engine`) rather
 than by hitting real providers; `signal_extraction.run_extraction` is replaced
 by a call-counting fake wherever a test needs to prove no new LLM calls occur.
+
+The portfolio-analysis logic under test lives in `pages/2_Portfolio_Upload.py`
+(moved off the app's front page, which is now the institutional universe) --
+loaded here via `importlib` as `app` since its filename starts with a digit
+and isn't a valid `import` target.
 """
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
-import app
 import config
 import portfolio as portfolio_mod
+
+_PAGE_PATH = Path(__file__).resolve().parents[1] / "pages" / "2_Portfolio_Upload.py"
+_spec = importlib.util.spec_from_file_location("app", _PAGE_PATH)
+app = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(app)
 
 
 # ---------------------------------------------------------------------------

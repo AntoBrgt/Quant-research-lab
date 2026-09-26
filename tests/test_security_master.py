@@ -126,7 +126,7 @@ def test_cusip_resolution_uses_cusip_id_type_and_separate_cache():
     provider = security_master.OpenFIGIProvider(session=session)
     result = security_master.resolve_cusips(["037833100"], provider=provider)
     assert result["037833100"]["ticker"] == "AAPL"
-    assert session.calls[0]["json"] == [{"idType": "ID_CUSIP", "idValue": "037833100"}]
+    assert session.calls[0]["json"] == [{"idType": "ID_CUSIP", "idValue": "037833100", "exchCode": "US"}]
 
     # Cached under a CUSIP-specific key: a second CUSIP lookup makes no request,
     # and the same string looked up as an ISIN is NOT served from the CUSIP entry.
@@ -134,4 +134,18 @@ def test_cusip_resolution_uses_cusip_id_type_and_separate_cache():
     assert len(session.calls) == 1
     import cache
     assert cache.get("security_master", "037833100") is None
-    assert cache.get("security_master", "CUSIP_037833100") is not None
+    assert cache.get("security_master", "CUSIP_v2_037833100") is not None
+
+
+def test_cusip_share_class_slash_becomes_yahoo_dash_and_foreign_lines_are_rejected():
+    session = _FakeSession([
+        _FakeResponse(200, [
+            {"data": [{"ticker": "BRK/B", "exchCode": "UN", "securityType": "Common Stock"},
+                      {"ticker": "BRK/B", "exchCode": "US", "securityType": "Common Stock"}]},
+            {"data": [{"ticker": "HONGBP", "exchCode": "LI", "securityType": "Common Stock"}]},
+        ]),
+    ])
+    result = security_master.resolve_cusips(["084670702", "438516106"], provider=security_master.OpenFIGIProvider(session=session))
+    assert result["084670702"]["ticker"] == "BRK-B"
+    assert result["084670702"]["exch_code"] == "US"  # composite preferred
+    assert result["438516106"] is None  # a London GBP line can't be priced as a US stock

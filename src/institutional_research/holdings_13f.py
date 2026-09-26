@@ -541,15 +541,32 @@ def merge_13f_mentions(new_13f: pd.DataFrame, output_path: Path = None) -> pd.Da
     return combined
 
 
+# Bump when a code change means previously built 13F mentions should be rebuilt
+# (e.g. v2: CUSIP -> ticker resolution fixed for BRK/B-style and foreign lines).
+REFRESH_VERSION = "2"
+
+
+def _marker() -> Path:
+    return config.RAW_DATA_DIR / "13f" / "_last_refresh.txt"
+
+
 def last_refreshed_at() -> Optional[str]:
-    marker = config.RAW_DATA_DIR / "13f" / "_last_refresh.txt"
-    return marker.read_text().strip() if marker.exists() else None
+    marker = _marker()
+    return marker.read_text().strip().split("|")[0] if marker.exists() else None
+
+
+def _refresh_version() -> Optional[str]:
+    marker = _marker()
+    if not marker.exists():
+        return None
+    parts = marker.read_text().strip().split("|")
+    return parts[1] if len(parts) > 1 else "1"
 
 
 def mark_refreshed() -> None:
-    marker = config.RAW_DATA_DIR / "13f" / "_last_refresh.txt"
+    marker = _marker()
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    marker.write_text(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}|{REFRESH_VERSION}")
 
 
 AUTO_REFRESH_MAX_AGE_DAYS = 7  # new 13Fs only appear quarterly; weekly is plenty
@@ -558,7 +575,7 @@ AUTO_REFRESH_MAX_AGE_DAYS = 7  # new 13Fs only appear quarterly; weekly is plent
 def needs_refresh(max_age_days: int = AUTO_REFRESH_MAX_AGE_DAYS) -> bool:
     """True if 13F data was never fetched, or the last refresh is older than `max_age_days`."""
     last = last_refreshed_at()
-    if not last:
+    if not last or _refresh_version() != REFRESH_VERSION:
         return True
     try:
         age = datetime.now(timezone.utc) - datetime.fromisoformat(last)

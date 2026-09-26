@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import logging
+
 import pandas as pd
 import streamlit as st
 
@@ -23,6 +25,10 @@ import horizon
 import live_chart
 import research_engine
 import screener
+
+# yfinance logs every unknown/delisted ticker at ERROR with a traceback; the
+# screener already reports failures in the UI, so keep the console readable.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 st.set_page_config(page_title="Company Research", layout="wide")
 st.title("Company Research")
@@ -149,7 +155,7 @@ def render_price_chart() -> None:
     mcols[2].metric("Window high / low", f"${bars['high'].max():,.2f} / ${bars['low'].min():,.2f}")
     mcols[3].metric("Last bar", pd.Timestamp(bars.index[-1]).strftime("%Y-%m-%d %H:%M"))
     fig = live_chart.build_figure(bars, ticker_input, chart_levels if show_levels else None, intraday=window.intraday)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.caption(
         f"{window.description} · Yahoo Finance (intraday typically ~15 min delayed)"
         + (f" · auto-refreshing every {window.refresh_seconds}s" if auto_refresh and window.refresh_seconds else "")
@@ -170,7 +176,7 @@ else:
     ctx = extended["institutional_context"]
     st.write(f"Mentioned by **{ctx['institution'].nunique()}** institution(s) across **{len(ctx)}** report reference(s).")
     display_cols = [c for c in ["institution", "report_title", "publication_date", "theme", "investment_horizon", "institutional_view", "view_direction", "confidence", "report_url"] if c in ctx.columns]
-    st.dataframe(ctx[display_cols], use_container_width=True)
+    st.dataframe(ctx[display_cols], width="stretch")
 
 st.divider()
 
@@ -297,7 +303,7 @@ with st.expander("Component breakdown (score × weight = contribution, per group
             {"component": group.replace("_", " "), "score": detail["score"], "weight": detail["weight"], "contribution": detail["contribution"]}
             for group, detail in sorted(hv["components"].items(), key=lambda kv: abs(kv[1]["contribution"]), reverse=True)
         ]
-        st.dataframe(pd.DataFrame(component_rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(component_rows), width="stretch")
     else:
         st.caption("No components had enough data at this horizon.")
     st.caption(

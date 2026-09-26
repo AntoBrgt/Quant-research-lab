@@ -173,10 +173,6 @@ A ticker alone is never a valid key input -- the key is derived from the actual 
 
 `src/config.py` also defines: `MAX_LLM_CALLS_PER_RUN` (caps real calls per run; cached items still resolve for free once the cap is hit), `MAX_SIGNALS_PER_CHUNK` (caps output size -- a well-formed 4500-character chunk should produce a handful of signals, not hundreds), and `LLM_REQUEST_TIMEOUT_SECONDS` (a stuck LLM call fails fast instead of hanging the whole run). The latter two exist because an earlier unscoped local-model run hung for hours and returned 900+ degenerate "signals" from single chunks.
 
-### Portfolio & recommendations
-
-`src/portfolio.py` validates a CSV (`ticker, quantity, average_cost[, currency]`) and computes market value/weight/P&L/concentration/sector exposure in plain pandas -- no LLM. `src/strategy.py` scores a company's cached research against a chosen horizon (`short_term`/`medium_term`/`long_term`) using one configurable weights dict. `src/recommendations.py` combines asset signal, strategy fit, portfolio fit, and risk into a `Recommendation` -- kept as separate, inspectable fields, never collapsed into one score -- with `INSUFFICIENT_EVIDENCE` returned rather than a forced call when signal coverage is thin.
-
 ### Running the app
 
 ```bash
@@ -184,100 +180,11 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Upload a portfolio CSV -- either the plain `ticker, quantity, average_cost` format or a supported broker export (see STEP 5) -- pick a risk profile and strategy, and run analysis. Only tickers with no cached signals yet trigger new (cache-first) extraction -- everything else reuses shared research.
+Pick a holding period on the front page; the ranked opportunities appear automatically (see STEP 8).
 
-## STEP 5 — Portfolio input normalization
+## STEP 5 — Portfolio input (removed)
 
-Real users upload broker transaction exports (every BUY/SELL/DIVIDEND/CASH/corporate-action event), not the clean `ticker, quantity, average_cost` snapshot `portfolio.py` was originally built for. `src/portfolio_importers/` bridges the two, broker-agnostically:
-
-```text
-raw broker CSV
-    -> detect.detect_format()                        (column-based, not filename-based)
-    -> a per-broker adapter (e.g. trade_republic.py)  -- NORMALIZATION
-    -> schema.CanonicalTransaction rows
-    -> schema.reconstruct_positions()                 -- RECONSTRUCTION
-    -> schema.CanonicalPosition rows
-    -> schema.to_simple_portfolio()                   -- bridges to portfolio.py's existing schema
-    -> portfolio.py (validate_portfolio / enrich_positions / recommendations, unchanged)
-```
-
-Normalization and reconstruction never touch the network or live prices -- an imported portfolio can be built and tested with zero network access. Market-price enrichment stays `portfolio.py`'s separate job, applied after reconstruction.
-
-### Canonical transaction schema (`portfolio_importers/schema.py`)
-
-| Field | Notes |
-|---|---|
-| `transaction_id` | Preserved from the broker; must be unique |
-| `date` | Full timestamp (not just a calendar date) -- ordering matters for cost-basis accounting |
-| `instrument_id` | Broker-agnostic identity -- see below |
-| `identity_type` | `ISIN` \| `SYMBOL` \| `NAME` \| `BROKER_ID` -- how trustworthy `instrument_id` is |
-| `name`, `symbol`, `asset_class` | Preserved as given by the broker |
-| `side` | `BUY` \| `SELL` \| `DIVIDEND` \| `INTEREST` \| `CASH_IN` \| `CASH_OUT` \| `OTHER` -- only `BUY`/`SELL` affect reconstruction |
-| `quantity`, `price`, `fees`, `tax` | Always non-negative magnitudes; direction lives in `side`, never in a sign |
-| `currency`, `amount` | `amount` keeps the broker's own signed net cash flow |
-| `broker`, `raw_type` | Traceability back to the source row |
-
-### Canonical position schema
-
-`instrument_id, name, symbol, asset_class, quantity, average_cost, total_invested, total_fees, currency`.
-
-**Cost-basis methodology: moving-average cost**, not FIFO/LIFO lot tracking, and not a tax-accounting method -- for portfolio analytics only, no tax/accounting claim is made. A BUY updates `average_cost` as a quantity-weighted average; a SELL reduces `quantity` only, leaving `average_cost` of the remaining shares unchanged. `total_invested = quantity * average_cost` (the cost basis of what's currently held). `total_fees` sums every fee/tax paid on the instrument, ever -- not reduced by sells. A position that nets to (approximately) zero quantity is not returned as a current holding.
-
-### Instrument identity
-
-`symbol` is not assumed to be a ticker. `instrument_id` is chosen in priority order -- ISIN (detected by shape: `^[A-Z]{2}[A-Z0-9]{9}[0-9]$`) > symbol/ticker > name -- and `identity_type` records which tier was used. This layer does **not** resolve an ISIN to a tradeable ticker (no security-master lookup); `schema.to_simple_portfolio()` uses `symbol` as-is, so a fund ISIN with no ticker mapping simply fails `portfolio.py`'s existing ticker validation, honestly, rather than being silently guessed.
-
-### How broker adapters work
-
-Each adapter is one module in `src/portfolio_importers/` (e.g. `trade_republic.py`) that owns:
-- `REQUIRED_COLUMNS`: the raw columns it needs (used by `detect.py` for format detection)
-- `parse(df) -> (list[CanonicalTransaction], list[rejected_row])`: maps the broker's own transaction-type vocabulary to `TransactionSide`, resolves instrument identity, and validates each row -- a malformed row (bad date/number, a trade missing its instrument, a duplicate `transaction_id`) is collected with a reason in the rejected list rather than raising and aborting the whole import, or being silently dropped.
-
-**To add a new broker:** write `src/portfolio_importers/<broker>.py` with its own `REQUIRED_COLUMNS` and a `parse()` matching the shape above; add one `elif`-equivalent branch to `detect.detect_format()`; add the module to `app.py`'s `IMPORTERS` dict. No other file needs to change -- `schema.reconstruct_positions()` is broker-agnostic and already handles whatever `CanonicalTransaction` rows the new adapter produces.
-
-### Supported input formats today
-
-- **Trade Republic transaction export** (`src/portfolio_importers/trade_republic.py`) -- currently the *only* broker adapter
-- **Plain portfolio CSV** (`ticker, quantity, average_cost[, currency]`) -- `portfolio.py`'s original format, still fully supported, detected as `"canonical"`
-
-### The full input-to-recommendation flow
-
-`app.py`'s single upload widget drives both formats through one path (`import_and_prepare_portfolio()`), which stays separate from, but feeds directly into, the unchanged recommendation pipeline:
-
-```text
-Broker export ──┐
-                ├→ detect_format() → adapter.parse() → reconstruct_positions() → to_simple_portfolio() ──┐
-Simple CSV ─────┘                                                                                        │
-                                                                                                            ▼
-                                                                          portfolio.validate_portfolio()  (splits: analyzable / unmapped)
-                                                                                                            │
-                                                                                                            ▼
-                                                              portfolio.enrich_positions() → research_engine (cached, no LLM)
-                                                                                                            │
-                                                                                                            ▼
-                                                                              strategy.score_strategy_fit() → recommendations.generate_recommendation()
-```
-
-Positions that fail `validate_portfolio()` (most commonly: a fund/stock ISIN with no ticker mapping -- ISIN→ticker resolution is deliberately not implemented) are **never silently dropped**. They're shown in a separate "unmapped" table with their name and asset class (not just the raw ISIN), so the reason no recommendation exists for them is visible, not mysterious. Importantly: a real Trade Republic export's `symbol` column is an ISIN for every stock and fund position -- only crypto happens to already be ticker-shaped -- so **today, uploading a real Trade Republic export analyzes only crypto holdings**; every stock/fund position lands in the unmapped table until a ticker-mapping step is added (see limitations).
-
-The importer never triggers extra LLM calls: it only ever produces a `ticker, quantity, average_cost, currency` frame, and it's `_ensure_research_available()` (unchanged) that decides whether a ticker needs new research -- exactly the same cache-first check regardless of whether the ticker came from a plain CSV or a broker export.
-
-### Architecture boundary
-
-Recommendations are model outputs with stated evidence, confidence, and data freshness -- not personalized financial advice, not a promise of performance, and never a fabricated price target.
-
-### Prototype limitations
-
-- The filesystem JSON cache and parquet usage log are fine at today's scale (a handful of tickers, one process) but aren't safe for concurrent writers or a large key count -- a real key-value store is the natural next step before many simultaneous users.
-- There is no auth or multi-tenant storage; portfolios are files passed in per run, not persisted per user.
-- JPM's filing text doesn't match the current section-heading regexes for Business/Risk Factors (only "Notes to Financial Statements" is detected) -- the heading heuristics in `process_documents.py` need broadening before JPM-style filings are fully covered.
-- The news provider (`yfinance` headlines) is free and best-effort, not a real news feed -- coverage and quality will be thin for less-followed tickers.
-- Sector exposure depends on `yfinance`'s `info` payload, which is itself best-effort and can be missing per ticker.
-- Corporate actions (spin-offs, splits, mergers) are not modeled as position-changing events -- a `SPIN_OFF` row, for example, is preserved but never turns into a new position, and is rejected outright if it lacks a currency (observed on a real export).
-- Only one broker adapter exists today (Trade Republic); `detect.py`'s precedence logic for an ambiguous/overlapping schema between two future adapters is untested against a real second broker.
-- **ISIN→ticker resolution is now available, opt-in, via `src/security_master.py`** (OpenFIGI, free, no API key required by default -- set `OPENFIGI_API_KEY` for higher rate limits). It is a separate, explicit, network-dependent step (an unchecked-by-default checkbox in the app), kept out of `portfolio_importers/` on purpose -- normalization/reconstruction stay network-free. Validated against the real Trade Republic export: **14/14 unmapped ISINs resolved to a ticker with real price data**, making all 15 positions analyzable for portfolio math (weight/P&L/concentration). Two things worth knowing before treating this as solved:
-  - A "high confidence" resolution means OpenFIGI matched a US-exchange listing -- it does **not** mean the ticker is a liquid, well-known one. Several resolved to obscure OTC pink-sheet symbols (e.g. Siemens → `SMAWF`, Schneider Electric → `SBGSF`, BNP Paribas → `BNPQF`) rather than the sponsored ADR tickers a person would recognize.
-  - **The resolved *price* ticker and the ticker any existing *SEC research* is cached under can differ**, and did: OpenFIGI resolved Sony to `SNEJF` (an unsponsored OTC quote), but this project's actual cached Sony research is under `SONY` (the sponsored ADR, the one with real 20-F filings). Resolving an ISIN makes a position priceable; it does not automatically connect it to the right research, and in this case it silently wouldn't have without a human noticing the mismatch. Only the 5 resolved tickers that happened to exactly match already-cached research (`GOOGL`, `V`, `NVDA`, `KO`, `RACE`) produced a real recommendation; the other 10 -- including Sony under the wrong ticker -- correctly showed `INSUFFICIENT_EVIDENCE` rather than a wrong answer, but for a subtler reason than "no data exists" in Sony's case. This is a real open question (should price-ticker resolution and research-ticker resolution be the same lookup?), not yet resolved.
+The portfolio upload flow (broker CSV importers, position reconstruction, per-holding recommendations) was removed in STEP 9 -- the app is now universe-first. It remains in git history before that commit.
 
 ## STEP 6 -- Institutional universe + horizon-aware research engine
 
@@ -377,7 +284,7 @@ Per-source staleness (price/fundamentals/institutional) against **horizon-depend
 
 ### Streamlit pages
 
-`app.py` is the front page, **Opportunities** (see STEP 8). `pages/1_Company_Research.py` (evidence verdict, live price chart, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) and `pages/2_Portfolio_Upload.py` (the original portfolio flow, functionally unchanged) follow in the sidebar.
+`app.py` is the front page, **Opportunities** (see STEP 8). `pages/1_Company_Research.py` (evidence verdict, live price chart, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) follows in the sidebar.
 
 ### Is ML justified yet?
 
@@ -436,3 +343,9 @@ or click **Refresh 13F holdings from SEC** on the front page. New 13Fs appear qu
 **Live chart** (`src/live_chart.py`): candles + SMA20/50/200, volume, RSI(14) (same definition as `market_features.compute_rsi`), with stop-loss/take-profit/support/resistance lines from `risk_reward.py`. The window follows the horizon -- ≤3 days: 5-minute bars over 5 days, auto-refreshing every 60s; ≤2 weeks: 30-minute bars; ≤3 months: 6 months daily; ≤2 years: 2 years daily; longer: 10 years weekly -- and can be switched manually. Bars come straight from Yahoo (typically ~15 min delayed intraday), are never written to the research price cache, and never feed the scoring.
 
 **Still true**: the ranking is a sort of the current evidence, not a return forecast. Nothing here has been validated against forward returns yet -- that backtest is the next step before trusting the labels with real size.
+
+## STEP 9 -- Cleanup after the first real run
+
+- **Portfolio upload removed**: `pages/2_Portfolio_Upload.py`, `portfolio.py`, `portfolio_importers/`, `recommendations.py`, `strategy.py` and their tests.
+- **CUSIP -> ticker fixes** (seen on real 13F data): OpenFIGI writes share classes as `BRK/B`, Yahoo needs `BRK-B`; and a CUSIP lookup could land on a foreign line (e.g. a London GBP listing) that Yahoo can't price. CUSIP jobs now ask OpenFIGI for the US composite (`exchCode=US`) only and return nothing rather than a foreign guess. Cached CUSIP resolutions from the first version are ignored (new cache prefix), and `holdings_13f.REFRESH_VERSION` forces one automatic 13F/universe rebuild on next app start.
+- yfinance's per-ticker ERROR tracebacks are silenced in the Streamlit pages (failures are still listed in the UI).

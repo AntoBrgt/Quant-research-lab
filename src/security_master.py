@@ -60,24 +60,36 @@ def _api_key() -> Optional[str]:
     return os.getenv("OPENFIGI_API_KEY")
 
 
-def _pick_candidate(candidates: list[dict]) -> Optional[dict]:
-    """Choose one candidate from OpenFIGI's result list for one ISIN.
+def _yahoo_ticker(ticker: Optional[str]) -> Optional[str]:
+    """OpenFIGI writes share classes with a slash (BRK/B); Yahoo uses a dash (BRK-B)."""
+    return ticker.strip().upper().replace("/", "-") if ticker else ticker
 
-    Prefers a US-exchange listing (unambiguous, no suffix needed); otherwise
-    takes the first candidate as a best-effort guess.
+
+def _pick_candidate(candidates: list[dict], us_only: bool = False) -> Optional[dict]:
+    """Choose one candidate from OpenFIGI's result list for one identifier.
+
+    Prefers the US composite listing ("US"), then any other US exchange code
+    (unambiguous, no suffix needed); otherwise takes the first candidate as a
+    best-effort guess -- unless `us_only`, where a non-US line (e.g. the London
+    GBP line of a US stock) is worse than no answer, because Yahoo won't price it.
     """
     if not candidates:
         return None
 
-    for candidate in candidates:
-        if candidate.get("exchCode") in _US_EXCH_CODES:
-            return {
-                "ticker": candidate.get("ticker"),
-                "name": candidate.get("name"),
-                "exch_code": candidate.get("exchCode"),
-                "security_type": candidate.get("securityType"),
-                "confidence": "high",
-            }
+    us = [c for c in candidates if c.get("exchCode") in _US_EXCH_CODES]
+    us.sort(key=lambda c: c.get("exchCode") != "US")  # composite first
+    if us:
+        candidate = us[0]
+        return {
+            "ticker": _yahoo_ticker(candidate.get("ticker")),
+            "name": candidate.get("name"),
+            "exch_code": candidate.get("exchCode"),
+            "security_type": candidate.get("securityType"),
+            "confidence": "high",
+        }
+
+    if us_only:
+        return None
 
     first = candidates[0]
     return {
@@ -123,7 +135,10 @@ class OpenFIGIProvider:
         """
         results: dict[str, Optional[dict]] = {}
         to_query: list[str] = []
-        key_prefix = "" if id_type == "ID_ISIN" else f"{id_type.removeprefix('ID_')}_"
+        # v2: US-composite-only picking + BRK/B -> BRK-B; bumping the prefix
+        # invalidates CUSIP resolutions cached by the first version.
+        key_prefix = "" if id_type == "ID_ISIN" else f"{id_type.removeprefix('ID_')}_v2_"
+        us_only = id_type == "ID_CUSIP"  # CUSIPs are US/Canadian securities; a foreign line won't price on Yahoo
 
         for isin in isins:
             cached = cache.get("security_master", f"{key_prefix}{isin}")
@@ -135,7 +150,10 @@ class OpenFIGIProvider:
         batch_size = BATCH_SIZE_WITH_KEY if _api_key() else BATCH_SIZE_NO_KEY
         for start in range(0, len(to_query), batch_size):
             batch = to_query[start : start + batch_size]
-            jobs = [{"idType": id_type, "idValue": isin} for isin in batch]
+            jobs = [
+                {"idType": id_type, "idValue": isin, **({"exchCode": "US"} if us_only else {})}
+                for isin in batch
+            ]
 
             try:
                 responses = self._post(jobs)
@@ -147,7 +165,7 @@ class OpenFIGIProvider:
 
             for isin, job_response in zip(batch, responses):
                 candidates = job_response.get("data")
-                resolution = _pick_candidate(candidates) if candidates else None
+                resolution = _pick_candidate(candidates, us_only=us_only) if candidates else None
                 results[isin] = resolution
                 cache.set("security_master", f"{key_prefix}{isin}", {"resolution": resolution})
 

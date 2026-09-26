@@ -233,3 +233,10 @@ def test_needs_refresh(isolated_data):
     h13f.mark_refreshed()
     assert not h13f.needs_refresh()
     assert h13f.needs_refresh(max_age_days=0)
+
+
+def test_needs_refresh_after_code_version_bump(isolated_data, monkeypatch):
+    h13f.mark_refreshed()
+    assert not h13f.needs_refresh()
+    monkeypatch.setattr(h13f, "REFRESH_VERSION", "999")
+    assert h13f.needs_refresh()

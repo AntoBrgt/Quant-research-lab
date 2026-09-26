@@ -22,6 +22,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+import logging
+
 import pandas as pd
 import streamlit as st
 
@@ -32,6 +34,10 @@ import screener
 from institutional_research import documents, holdings_13f, parser, providers, universe
 
 MAX_UI_CHUNKS_PER_RUN = 30  # safety cap for on-demand report ingestion triggered from the UI
+
+# yfinance logs every unknown/delisted ticker at ERROR with a traceback; the
+# screener already reports failures in the UI, so keep the console readable.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 st.set_page_config(page_title="Opportunities", layout="wide")
 st.title("Opportunities for your horizon")
@@ -68,7 +74,7 @@ if holdings_13f.needs_refresh() and not st.session_state.get("auto_13f_attempted
         summaries = refresh_13f_and_universe(filers)
         failed = [s for s in summaries if not str(s["status"]).startswith("ok")]
         status.update(label=f"13F holdings updated ({len(summaries) - len(failed)}/{len(summaries)} institutions)", state="error" if failed else "complete")
-        st.dataframe(pd.DataFrame(summaries), use_container_width=True)
+        st.dataframe(pd.DataFrame(summaries), width="stretch")
 
 mentions = pd.read_parquet(config.INSTITUTIONAL_MENTIONS_PATH) if config.INSTITUTIONAL_MENTIONS_PATH.exists() else pd.DataFrame()
 universe_df = pd.read_parquet(config.INSTITUTIONAL_UNIVERSE_PATH) if config.INSTITUTIONAL_UNIVERSE_PATH.exists() else pd.DataFrame()
@@ -122,7 +128,7 @@ else:
                   "risk_reward_ratio", "dominant_factors"]
     event = st.dataframe(
         view[table_cols].reset_index(drop=True),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -152,7 +158,7 @@ else:
     failed = ranking[ranking["error"].notna()]
     if not failed.empty:
         with st.expander(f"{len(failed)} compan(ies) could not be scored"):
-            st.dataframe(failed[["ticker", "company_name", "error"]], use_container_width=True, hide_index=True)
+            st.dataframe(failed[["ticker", "company_name", "error"]], width="stretch", hide_index=True)
 
 st.divider()
 
@@ -167,12 +173,12 @@ with st.expander("Data sources"):
     if st.button("Refresh 13F holdings now"):
         with st.spinner("Fetching latest 13F filings from SEC EDGAR..."):
             summaries = refresh_13f_and_universe(filers)
-        st.dataframe(pd.DataFrame(summaries), use_container_width=True)
+        st.dataframe(pd.DataFrame(summaries), width="stretch")
         st.rerun()
 
     if not mentions.empty:
         st.markdown("**Institutional themes** (from ingested reports, independent of whether a company was identified)")
-        st.dataframe(universe.theme_summary(mentions), use_container_width=True)
+        st.dataframe(universe.theme_summary(mentions), width="stretch")
 
     st.markdown("**Optional: institutional research reports** (LLM-parsed outlooks, adds themes and extra mentions)")
     st.caption(

@@ -29,7 +29,6 @@ import streamlit as st
 
 import config
 import horizon
-import price_provider
 import screener
 from institutional_research import documents, holdings_13f, parser, providers, universe
 
@@ -86,16 +85,13 @@ if universe_df.empty:
     )
 else:
     # --- Ranking (cached per horizon per day) -----------------------------------
-    ranking = screener.load_cached_ranking(horizon_days, config.INSTITUTIONAL_UNIVERSE_PATH)
-    if ranking is None or st.session_state.pop("force_rerank", False):
-        bar = st.progress(0.0, text=f"Scoring {len(universe_df)} companies for a {horizon_label} horizon...")
-        ranking = screener.rank_universe(
-            universe_df, horizon_days, mentions,
-            prefetch=price_provider.get_price_history,
-            progress=lambda done, total, t: bar.progress(done / total, text=f"Scoring for {horizon_label}: {t} ({done}/{total})"),
-        )
-        bar.empty()
-        screener.save_ranking(ranking, horizon_days, config.INSTITUTIONAL_UNIVERSE_PATH)
+    bar = st.empty()
+    ranking = screener.get_ranking(
+        universe_df, horizon_days, mentions, config.INSTITUTIONAL_UNIVERSE_PATH,
+        force=st.session_state.pop("force_rerank", False),
+        progress=lambda done, total, t: bar.progress(done / total, text=f"Scoring for {horizon_label}: {t} ({done}/{total})"),
+    )
+    bar.empty()
 
     # --- Filters ------------------------------------------------------------------
     fcols = st.columns([2, 2, 2, 1])

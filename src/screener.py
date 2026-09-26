@@ -174,3 +174,106 @@ def save_ranking(ranking: pd.DataFrame, horizon_days: int, universe_path) -> Non
     path = _cache_path(horizon_days, universe_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     ranking.to_parquet(path, index=False)
+
+
+# ----------------------------------------------------------------------------
+# "Quick picks": the ranking reduced to BUY / SELL lines with prices and size
+# ----------------------------------------------------------------------------
+
+MAX_POSITION_PCT = 0.20  # never put more than 20% of the capital in one line
+
+
+def _why(row: pd.Series) -> str:
+    parts = [f"technicals {str(row['technical_view']).lower()}", f"fundamentals {str(row['fundamental_view']).lower()}"]
+    if row.get("institutional_view") and row["institutional_view"] != "INSUFFICIENT_EVIDENCE":
+        parts.append(f"institutions {str(row['institutional_view']).lower()}")
+    driven = f"; driven by {row['dominant_factors']}" if row.get("dominant_factors") else ""
+    return ", ".join(parts).replace("_", " ") + driven
+
+
+def _position_size(price, stop, capital: float, risk_pct: float, n_positions: int) -> tuple[Optional[int], str]:
+    """Risk-based sizing: lose at most `risk_pct` of capital if the stop is hit,
+    capped at MAX_POSITION_PCT of capital. Without a stop (long horizons use a
+    thesis exit, not a price), fall back to an equal split of the capital."""
+    if price is None or pd.isna(price) or price <= 0 or capital <= 0:
+        return None, "n/a"
+    cap_shares = capital * MAX_POSITION_PCT / price
+    if stop is not None and not pd.isna(stop) and 0 < stop < price:
+        risk_shares = capital * risk_pct / (price - stop)
+        shares = int(min(risk_shares, cap_shares))
+        return shares, "risk-based" if risk_shares <= cap_shares else f"capped at {MAX_POSITION_PCT:.0%}"
+    shares = int(min(capital / max(n_positions, 1) / price, cap_shares))
+    return shares, "equal split (no price stop at this horizon)"
+
+
+def quick_picks(
+    ranking: pd.DataFrame,
+    n_buy: int = 10,
+    n_sell: int = 10,
+    capital: float = 10_000.0,
+    risk_pct: float = 0.01,
+    min_risk_reward: float = 1.0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(buys, sells) -- the simplest possible reading of the ranking.
+
+    BUY  = top of the shortlist (Strong/Favorable, fresh data, enough evidence)
+           whose risk/reward is at least `min_risk_reward` -- a strong name whose
+           target is closer than its stop is a bad entry right now, not a buy.
+           Long horizons have no price target (ratio None) and aren't filtered.
+    SELL = the most Unfavorable names: sell if you hold them, don't buy them.
+    Prices are the risk_reward.py levels the ranking already carries; nothing
+    new is estimated here.
+    """
+    empty_cols = ["action", "ticker", "company_name", "label", "price", "stop_loss", "take_profit", "upside", "downside",
+                  "risk_reward_ratio", "shares", "amount", "sizing", "why", "confidence", "rank_score"]
+    if ranking is None or ranking.empty:
+        return pd.DataFrame(columns=empty_cols), pd.DataFrame(columns=empty_cols)
+
+    def build(rows: pd.DataFrame, action: str) -> pd.DataFrame:
+        out = []
+        for _, row in rows.iterrows():
+            price, stop, target = row["current_price"], row["stop_loss"], row["take_profit"]
+            shares, sizing = _position_size(price, stop, capital, risk_pct, len(rows)) if action == "BUY" else (None, "")
+            out.append({
+                "action": action,
+                "ticker": row["ticker"],
+                "company_name": row["company_name"],
+                "label": row["label"],
+                "price": price,
+                "stop_loss": stop,
+                "take_profit": target,
+                "upside": (target / price - 1) if price and target and not pd.isna(target) else None,
+                "downside": (stop / price - 1) if price and stop and not pd.isna(stop) else None,
+                "risk_reward_ratio": row["risk_reward_ratio"],
+                "shares": shares,
+                "amount": shares * price if shares else None,
+                "sizing": sizing,
+                "why": _why(row),
+                "confidence": row["confidence"],
+                "rank_score": row["rank_score"],
+            })
+        return pd.DataFrame(out, columns=empty_cols)
+
+    rr = pd.to_numeric(ranking["risk_reward_ratio"], errors="coerce")
+    buys = ranking[ranking["shortlisted"] & (rr.isna() | (rr >= min_risk_reward))]
+    buys = buys.sort_values("rank_score", ascending=False).head(n_buy)
+    sells = ranking[ranking["label"] == "Unfavorable"].sort_values("rank_score").head(n_sell)
+    return build(buys, "BUY"), build(sells, "SELL")
+
+
+def get_ranking(
+    universe_df: pd.DataFrame,
+    horizon_days: int,
+    mentions: pd.DataFrame,
+    universe_path,
+    force: bool = False,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> pd.DataFrame:
+    """Today's cached ranking for this horizon, computing (and caching) it if needed."""
+    ranking = None if force else load_cached_ranking(horizon_days, universe_path)
+    if ranking is None:
+        import price_provider
+
+        ranking = rank_universe(universe_df, horizon_days, mentions, prefetch=price_provider.get_price_history, progress=progress)
+        save_ranking(ranking, horizon_days, universe_path)
+    return ranking

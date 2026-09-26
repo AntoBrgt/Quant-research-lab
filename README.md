@@ -349,3 +349,12 @@ or click **Refresh 13F holdings from SEC** on the front page. New 13Fs appear qu
 - **Portfolio upload removed**: `pages/2_Portfolio_Upload.py`, `portfolio.py`, `portfolio_importers/`, `recommendations.py`, `strategy.py` and their tests.
 - **CUSIP -> ticker fixes** (seen on real 13F data): OpenFIGI writes share classes as `BRK/B`, Yahoo needs `BRK-B`; and a CUSIP lookup could land on a foreign line (e.g. a London GBP listing) that Yahoo can't price. CUSIP jobs now ask OpenFIGI for the US composite (`exchCode=US`) only and return nothing rather than a foreign guess. Cached CUSIP resolutions from the first version are ignored (new cache prefix), and `holdings_13f.REFRESH_VERSION` forces one automatic 13F/universe rebuild on next app start.
 - yfinance's per-ticker ERROR tracebacks are silenced in the Streamlit pages (failures are still listed in the UI).
+
+## STEP 10 -- Quick Picks (the "lazy" page)
+
+`pages/0_Quick_Picks.py`: pick a horizon, a budget, the max loss per trade, and how many picks -> an order list.
+
+- **BUY**: top of the shortlist (Strong/Favorable, fresh data, enough evidence) with risk/reward ≥ 1 (a strong name whose target is closer than its stop is a bad entry today). Each line: limit price (current), stop, target, % to each, **shares and amount**.
+- **Sizing** (`screener.quick_picks`): lose at most *max loss %* of the budget if the stop is hit (`shares = budget × risk% / (price − stop)`), never more than 20% of the budget in one line; long horizons with no price stop fall back to an equal split.
+- **SELL / avoid**: the most Unfavorable names -- sell if held (or keep the stop shown), don't buy.
+- Same cached ranking as the Opportunities page (`screener.get_ranking`), so it costs nothing extra once a horizon has been scored today. Click any row for the full Company Research view.

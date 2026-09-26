@@ -113,13 +113,20 @@ class OpenFIGIProvider:
 
         raise RuntimeError("OpenFIGI rate limit exceeded after retries")
 
-    def resolve_many(self, isins: list[str]) -> dict[str, Optional[dict]]:
-        """Resolve a list of ISINs, using the disk cache for anything already looked up."""
+    def resolve_many(self, isins: list[str], id_type: str = "ID_ISIN") -> dict[str, Optional[dict]]:
+        """Resolve a list of identifiers (ISINs by default), using the disk cache
+        for anything already looked up.
+
+        `id_type` is OpenFIGI's idType -- "ID_ISIN" (default, unchanged cache
+        keys) or "ID_CUSIP" (13F holdings; cached under a "CUSIP_" prefix so
+        a CUSIP can never collide with an ISIN cache entry).
+        """
         results: dict[str, Optional[dict]] = {}
         to_query: list[str] = []
+        key_prefix = "" if id_type == "ID_ISIN" else f"{id_type.removeprefix('ID_')}_"
 
         for isin in isins:
-            cached = cache.get("security_master", isin)
+            cached = cache.get("security_master", f"{key_prefix}{isin}")
             if cached is not None:
                 results[isin] = cached["resolution"]
             else:
@@ -128,7 +135,7 @@ class OpenFIGIProvider:
         batch_size = BATCH_SIZE_WITH_KEY if _api_key() else BATCH_SIZE_NO_KEY
         for start in range(0, len(to_query), batch_size):
             batch = to_query[start : start + batch_size]
-            jobs = [{"idType": "ID_ISIN", "idValue": isin} for isin in batch]
+            jobs = [{"idType": id_type, "idValue": isin} for isin in batch]
 
             try:
                 responses = self._post(jobs)
@@ -142,7 +149,7 @@ class OpenFIGIProvider:
                 candidates = job_response.get("data")
                 resolution = _pick_candidate(candidates) if candidates else None
                 results[isin] = resolution
-                cache.set("security_master", isin, {"resolution": resolution})
+                cache.set("security_master", f"{key_prefix}{isin}", {"resolution": resolution})
 
         return results
 
@@ -151,3 +158,11 @@ def resolve_isins(isins: list[str], provider: Optional[SecurityMasterProvider] =
     """Convenience function using the default (OpenFIGI) provider."""
     provider = provider or OpenFIGIProvider()
     return provider.resolve_many(isins)
+
+
+def resolve_cusips(cusips: list[str], provider: Optional[SecurityMasterProvider] = None) -> dict[str, Optional[dict]]:
+    """CUSIP -> ticker (13F holdings are keyed by CUSIP, not ISIN). Same
+    provider, cache, and US-listing-first confidence rules as `resolve_isins`.
+    """
+    provider = provider or OpenFIGIProvider()
+    return provider.resolve_many(cusips, id_type="ID_CUSIP")

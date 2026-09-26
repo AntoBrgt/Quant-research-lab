@@ -117,3 +117,21 @@ def test_network_failure_resolves_batch_to_none_without_crashing():
 
     result = security_master.resolve_isins(["US02079K3059"], provider=security_master.OpenFIGIProvider(_RaisingSession()))
     assert result["US02079K3059"] is None
+
+
+def test_cusip_resolution_uses_cusip_id_type_and_separate_cache():
+    session = _FakeSession([
+        _FakeResponse(200, [{"data": [{"ticker": "AAPL", "name": "Apple Inc", "exchCode": "US", "securityType": "Common Stock"}]}]),
+    ])
+    provider = security_master.OpenFIGIProvider(session=session)
+    result = security_master.resolve_cusips(["037833100"], provider=provider)
+    assert result["037833100"]["ticker"] == "AAPL"
+    assert session.calls[0]["json"] == [{"idType": "ID_CUSIP", "idValue": "037833100"}]
+
+    # Cached under a CUSIP-specific key: a second CUSIP lookup makes no request,
+    # and the same string looked up as an ISIN is NOT served from the CUSIP entry.
+    security_master.resolve_cusips(["037833100"], provider=provider)
+    assert len(session.calls) == 1
+    import cache
+    assert cache.get("security_master", "037833100") is None
+    assert cache.get("security_master", "CUSIP_037833100") is not None

@@ -25,7 +25,7 @@ import streamlit as st
 
 import config
 import horizon
-from institutional_research import documents, parser, providers, universe
+from institutional_research import documents, holdings_13f, parser, providers, universe
 
 MAX_UI_CHUNKS_PER_RUN = 30  # safety cap for on-demand ingestion triggered from the UI
 
@@ -51,8 +51,35 @@ st.caption(f"Selected horizon: **{horizon_label}** ({st.session_state['horizon_d
 
 st.divider()
 
-# --- 2. Ingestion (explicit, opt-in, cache-first) ------------------------------
-st.header("2. Ingest institutional reports")
+# --- 2. Automatic source: SEC 13F holdings -------------------------------------
+st.header("2. Institutional holdings (SEC 13F, automatic)")
+filers = holdings_13f.load_filers()
+st.caption(
+    "Actual quarterly US-equity positions filed with the SEC by: **"
+    + ", ".join(filers)
+    + "**. No LLM, no manual files. Edit `data/raw/13f_filers.csv` (columns `institution, cik`) to change the list. "
+    "13Fs are filed up to 45 days after quarter end, long positions only -- a holding or an add is context, not a buy signal. "
+    "Adds/cuts are measured relative to each filer's median change, so index-fund inflows don't look like conviction."
+)
+last_13f = holdings_13f.last_refreshed_at()
+st.write(f"Last 13F refresh: **{last_13f or 'never'}**")
+if st.button("Refresh 13F holdings from SEC", type="primary" if not last_13f else "secondary"):
+    with st.spinner("Fetching latest 13F filings from SEC EDGAR, resolving tickers, rebuilding the universe (1-3 min)..."):
+        new_13f, summaries_13f = holdings_13f.refresh_13f_mentions(filers)
+        combined_mentions = holdings_13f.merge_13f_mentions(new_13f, config.INSTITUTIONAL_MENTIONS_PATH)
+        holdings_13f.mark_refreshed()
+        universe_df = universe.build_universe(combined_mentions)
+        universe_df.to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
+    st.dataframe(pd.DataFrame(summaries_13f), use_container_width=True)
+    if any(not str(s["status"]).startswith("ok") for s in summaries_13f):
+        st.warning("Some filers failed -- see the status column. The others were still saved.")
+    else:
+        st.success(f"{len(new_13f)} holding rows from {len(summaries_13f)} filers -> {len(universe_df)} companies in the universe.")
+
+st.divider()
+
+# --- 2b. Optional: research reports (explicit, opt-in, cache-first) -----------
+st.header("2b. Optional: ingest institutional research reports")
 st.caption(
     f"Drop report files (.txt, .md, .pdf, .html) into `data/raw/institutional/<institution>/` "
     f"(e.g. `data/raw/institutional/BlackRock/2026_outlook.pdf`), then parse them below. "
@@ -107,8 +134,8 @@ universe_df = pd.read_parquet(config.INSTITUTIONAL_UNIVERSE_PATH) if config.INST
 
 if universe_df.empty:
     st.info(
-        "No universe built yet. The universe is built **only** from institutional reports you "
-        "ingest above -- it does not seed itself from any other tickers in this project."
+        "No universe built yet. Click **Refresh 13F holdings from SEC** above (automatic), and/or ingest "
+        "institutional reports -- the universe does not seed itself from any other tickers in this project."
     )
     st.stop()
 
@@ -121,6 +148,8 @@ sector_filter = filter_cols[1].multiselect("Sector", sorted(universe_df["sector"
 all_themes = sorted({t for themes in universe_df["themes"] for t in themes})
 theme_filter = filter_cols[2].multiselect("Theme", all_themes)
 direction_filter = filter_cols[3].multiselect("Institutional direction", sorted(universe_df["institutional_direction"].dropna().unique().tolist()))
+institution_options = sorted(mentions["institution"].dropna().unique().tolist()) if not mentions.empty else []
+institution_filter = st.multiselect("Held / mentioned by institution", institution_options)
 
 max_mentions = int(universe_df["institutional_mentions"].max())
 if max_mentions > 1:
@@ -137,6 +166,9 @@ if theme_filter:
     filtered = filtered[filtered["themes"].apply(lambda themes: any(t in themes for t in theme_filter))]
 if direction_filter:
     filtered = filtered[filtered["institutional_direction"].isin(direction_filter)]
+if institution_filter:
+    tickers_for_institutions = set(mentions[mentions["institution"].isin(institution_filter)]["ticker"].dropna())
+    filtered = filtered[filtered["ticker"].isin(tickers_for_institutions)]
 
 st.write(f"**{len(filtered)}** compan(ies) match the current filters.")
 st.dataframe(

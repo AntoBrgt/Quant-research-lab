@@ -3,6 +3,8 @@
     python src/ingest_institutional_research.py --fetch-urls   # opt-in: download data/raw/institutional_urls.csv
     python src/ingest_institutional_research.py                # parse whatever is under data/raw/institutional/
     python src/ingest_institutional_research.py --max-chunks 20 # cost-controlled test run
+    python src/ingest_institutional_research.py --13f          # automatic: latest SEC 13F holdings, no LLM
+    python src/ingest_institutional_research.py --13f-only     # 13F refresh only, skip report parsing
 
 Mirrors `process_documents.py` + `extract_signals.py`'s two-stage shape, but
 for institutional reports instead of SEC filings: load raw files -> cache-first
@@ -16,7 +18,9 @@ import argparse
 import logging
 
 import config
-from institutional_research import documents, parser, providers, universe
+import pandas as pd
+
+from institutional_research import documents, holdings_13f, parser, providers, universe
 
 LOGGER_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOGGER_FORMAT)
@@ -28,11 +32,34 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fetch-urls", action="store_true", help="Opt-in: download data/raw/institutional_urls.csv first (network).")
     p.add_argument("--max-chunks", type=int, default=None, help="Cap chunks processed this run (cost control).")
     p.add_argument("--dry-run", action="store_true", help="Report what would be processed without calling the LLM.")
+    p.add_argument("--13f", dest="holdings_13f", action="store_true", help="Also refresh SEC 13F holdings for the configured filers (network, no LLM).")
+    p.add_argument("--13f-only", dest="holdings_13f_only", action="store_true", help="Refresh 13F holdings and rebuild the universe; skip report parsing.")
     return p.parse_args()
+
+
+def refresh_13f() -> pd.DataFrame:
+    mentions, summaries = holdings_13f.refresh_13f_mentions()
+    for summary in summaries:
+        logger.info("13F | %s", summary)
+    combined = holdings_13f.merge_13f_mentions(mentions)
+    holdings_13f.mark_refreshed()
+    logger.info("Saved %d 13F mention(s) (%d total mentions)", len(mentions), len(combined))
+    return combined
+
+
+def rebuild_universe() -> None:
+    combined = pd.read_parquet(config.INSTITUTIONAL_MENTIONS_PATH)
+    rebuild_universe()
 
 
 def main() -> None:
     args = parse_args()
+
+    if args.holdings_13f or args.holdings_13f_only:
+        refresh_13f()
+        if args.holdings_13f_only:
+            rebuild_universe()
+            return
 
     if args.fetch_urls:
         results = providers.fetch_from_url_list()
@@ -49,6 +76,8 @@ def main() -> None:
             "after populating data/raw/institutional_urls.csv.",
             config.INSTITUTIONAL_RAW_DIR,
         )
+        if args.holdings_13f:
+            rebuild_universe()
         return
 
     if args.dry_run:
@@ -62,9 +91,7 @@ def main() -> None:
     logger.info("Saved %d new mention(s) (%d total) to %s", len(new_mentions), len(combined), config.INSTITUTIONAL_MENTIONS_PATH)
     logger.info("Summary: %s", summary)
 
-    universe_df = universe.build_universe(combined)
-    universe_df.to_parquet(config.INSTITUTIONAL_UNIVERSE_PATH, index=False)
-    logger.info("Universe: %d compan(ies) with an identified ticker -> %s", len(universe_df), config.INSTITUTIONAL_UNIVERSE_PATH)
+    rebuild_universe()
 
 
 if __name__ == "__main__":

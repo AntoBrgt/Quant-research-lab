@@ -377,7 +377,7 @@ Per-source staleness (price/fundamentals/institutional) against **horizon-depend
 
 ### Streamlit pages
 
-`pages/1_Institutional_Universe.py` (choose horizon -> ingest reports -> explore/filter the universe by region/sector/theme/institution/direction -> pick a company) and `pages/2_Company_Research.py` (overview, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) -- both additive; `app.py`'s existing portfolio flow is unchanged.
+`app.py` is the front page: the Institutional Universe (choose horizon -> refresh 13F holdings and/or ingest reports -> explore/filter the universe by region/sector/theme/institution/direction -> pick a company). `pages/1_Company_Research.py` (overview, institutional context, fundamentals, technicals, historical evidence, risk/reward, research conclusion) and `pages/2_Portfolio_Upload.py` (the original portfolio flow, functionally unchanged) follow in the sidebar.
 
 ### Is ML justified yet?
 
@@ -391,3 +391,34 @@ Per-source staleness (price/fundamentals/institutional) against **horizon-depend
 - No backtesting/evaluation harness yet (brief section 20) -- the risk/reward and horizon-fit methodology is not yet validated against historical forward returns.
 - Support/resistance is a simple 60-day swing high/low, not a statistically fitted level.
 
+
+## STEP 7 -- Automatic institutional input: SEC 13F holdings
+
+Research reports have to be found, saved, and LLM-parsed by hand, and they mostly name themes rather than companies. `src/institutional_research/holdings_13f.py` adds a fully automatic second source: the quarterly **Form 13F-HR** every US manager with >$100M in US equities files with the SEC -- actual positions, structured XML, free, no LLM.
+
+```text
+SEC submissions JSON (per filer CIK) -> latest two 13F-HR filings (current + prior quarter)
+    -> information table XML (cached at data/raw/13f/<cik>/<accession>.parquet -- a filed 13F never changes)
+    -> one row per CUSIP (options and bond/PRN rows dropped, sub-manager rows summed)
+    -> quarter-over-quarter change, flow-adjusted + split-adjusted
+    -> top 30 holdings by value + 10 biggest adds/new + 10 biggest cuts/exits per filer
+    -> CUSIP -> ticker via security_master.resolve_cusips (OpenFIGI, cached; ETFs/funds dropped)
+    -> InstitutionalMention rows (report_type="13F") merged into institutional_mentions.parquet
+```
+
+**Default filers** (the five largest 13F filers): BlackRock (CIK 2012383), Vanguard (102909), State Street (93751), Fidelity/FMR (315066), JPMorgan Chase (19617). Override with `data/raw/13f_filers.csv` (`institution,cik`). Index giants hold essentially the whole market, so their *top holdings* are just the biggest companies -- the informative part is the adds/cuts. Adding a concentrated active manager (e.g. Berkshire Hathaway, CIK 1067983) makes the universe more opinionated.
+
+**Direction mapping** -- what the filer *did*, never "BUY": `NEW` position -> `POSITIVE`/High, flow-adjusted add >10% -> `POSITIVE`/Medium, cut >10% -> `NEGATIVE`/Medium, full exit -> `NEGATIVE`/High, otherwise `MENTIONED`/Low.
+
+- **Flow adjustment**: a position's share change is divided by the filer's *median* share change. An index manager whose every position grew +5% from inflows shows 0% on each, not +5% "buying".
+- **Split adjustment**: a 4:1 split shows as shares x4 with the filing-implied price (value/shares) /4 in the same quarter; that's detected and divided out instead of reported as a +300% add.
+- Refreshing replaces the previous 13F rows for those filers (latest quarter only); LLM report mentions are left untouched. One failing filer never stops the others.
+
+Run it:
+```bash
+python src/ingest_institutional_research.py --13f-only   # 13F only, rebuild universe
+python src/ingest_institutional_research.py --13f        # 13F + parse any local reports
+```
+or click **Refresh 13F holdings from SEC** on the front page. New 13Fs appear quarterly (mid-Feb/May/Aug/Nov), so a refresh a few times per quarter is plenty.
+
+**Limits**: filed up to 45 days after quarter end; long US equity positions only (no shorts, non-US holdings, or intra-quarter trades); amendments (13F-HR/A) ignored; a CUSIP change from a merger/reorganization looks like an exit + new position; split detection is a heuristic on filing-implied prices.

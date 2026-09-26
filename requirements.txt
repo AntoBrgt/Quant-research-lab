@@ -12,3 +12,4 @@ yfinance
 requests
 streamlit
 pytest
+pypdf

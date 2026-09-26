@@ -50,6 +50,19 @@ SIGNALS_PATH = PROCESSED_DATA_DIR / "signals.parquet"
 NEWS_SIGNALS_PATH = PROCESSED_DATA_DIR / "news_signals.parquet"
 LLM_USAGE_PATH = PROCESSED_DATA_DIR / "llm_usage.parquet"
 PRICES_DIR = RAW_DATA_DIR / "prices"
+FUNDAMENTALS_DIR = RAW_DATA_DIR / "fundamentals"
+
+# Relative-strength benchmark (technicals.py). No benchmark convention existed
+# anywhere in this project before -- SPY (SPDR S&P 500 ETF) is chosen as a
+# broad, liquid, freely-available-via-yfinance US equity market proxy,
+# appropriate for this project's largely US-large-cap universe today. It is
+# fetched through the same cached price_provider as any other ticker.
+DEFAULT_BENCHMARK_TICKER = os.getenv("DEFAULT_BENCHMARK_TICKER", "SPY")
+
+INSTITUTIONAL_RAW_DIR = RAW_DATA_DIR / "institutional"
+INSTITUTIONAL_URL_LIST_PATH = RAW_DATA_DIR / "institutional_urls.csv"
+INSTITUTIONAL_MENTIONS_PATH = PROCESSED_DATA_DIR / "institutional_mentions.parquet"
+INSTITUTIONAL_UNIVERSE_PATH = PROCESSED_DATA_DIR / "institutional_universe.parquet"
 
 # ---------------------------------------------------------------------------
 # LLM provider
@@ -85,6 +98,10 @@ MAX_LLM_CALLS_PER_RUN = _env_int("MAX_LLM_CALLS_PER_RUN", 500)
 # gets stuck in a repetition loop can otherwise emit hundreds from one chunk
 # (observed: 972 and 909 "signals" from single 4500-char chunks).
 MAX_SIGNALS_PER_CHUNK = _env_int("MAX_SIGNALS_PER_CHUNK", 15)
+# Same runaway-generation guard, applied to institutional-report mention
+# extraction (institutional_research/parser.py) -- a report chunk should
+# surface a handful of distinct exposures, not dozens.
+MAX_MENTIONS_PER_CHUNK = _env_int("MAX_MENTIONS_PER_CHUNK", 15)
 # A stuck/hanging request (observed: multi-hour hangs on dense chunks) is worse
 # than a failed one -- fail fast and move on instead of blocking the whole run.
 LLM_REQUEST_TIMEOUT_SECONDS = _env_int("LLM_REQUEST_TIMEOUT_SECONDS", 120)

@@ -51,11 +51,20 @@ def _cache_is_fresh(path: Path) -> bool:
 def _download(ticker: str) -> Optional[pd.DataFrame]:
     import yfinance as yf  # imported lazily so tests never need it installed
 
+    # auto_adjust=True makes yfinance return a fully split/dividend-adjusted
+    # OHLC set (Open/High/Low/Close all adjusted consistently) rather than an
+    # adjusted Close alongside raw High/Low. With auto_adjust=False those two
+    # would be on different price scales for any ticker with a split or large
+    # dividend inside the lookback window -- ATR/support-resistance (from raw
+    # High/Low) would then silently disagree with returns/moving averages
+    # (from adjusted Close). Every technical indicator in this project uses
+    # this single adjusted price series; there is no raw/unadjusted variant
+    # kept anywhere, so there is nothing left to accidentally mix.
     data = yf.download(
         ticker,
         period=f"{YEARS_OF_HISTORY}y",
         interval="1d",
-        auto_adjust=False,
+        auto_adjust=True,
         progress=False,
         threads=False,
     )
@@ -67,11 +76,16 @@ def _download(ticker: str) -> Optional[pd.DataFrame]:
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
 
-    if "Adj Close" not in data.columns:
-        logger.error("Adjusted Close column missing for %s. Columns: %s", ticker, list(data.columns))
+    if "Close" not in data.columns:
+        logger.error("Close column missing for %s. Columns: %s", ticker, list(data.columns))
         return None
 
-    prices = data[["Adj Close", "Volume"]].rename(columns={"Adj Close": "adj_close", "Volume": "volume"})
+    # `adj_close` is kept as the column name for backward compatibility with
+    # every existing caller -- its value is now simply the (already adjusted)
+    # Close, not a separately-adjusted series alongside a raw one.
+    keep = {"Close": "adj_close", "Open": "open", "High": "high", "Low": "low", "Volume": "volume"}
+    available = {src: dst for src, dst in keep.items() if src in data.columns}
+    prices = data[list(available)].rename(columns=available)
     prices.index.name = "date"
     prices = prices.dropna(subset=["adj_close"])
 

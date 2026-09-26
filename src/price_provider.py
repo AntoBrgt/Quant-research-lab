@@ -48,7 +48,9 @@ def _cache_is_fresh(path: Path) -> bool:
     return age_hours < CACHE_MAX_AGE_HOURS
 
 
-def _download(ticker: str) -> Optional[pd.DataFrame]:
+def _download(ticker: str, years: int = YEARS_OF_HISTORY) -> Optional[pd.DataFrame]:
+    """`years` defaults to the app's 2-year window; the backtest
+    (`backtest/data.py`) asks for longer history into its own cache."""
     import yfinance as yf  # imported lazily so tests never need it installed
 
     # auto_adjust=True makes yfinance return a fully split/dividend-adjusted
@@ -62,7 +64,7 @@ def _download(ticker: str) -> Optional[pd.DataFrame]:
     # kept anywhere, so there is nothing left to accidentally mix.
     data = yf.download(
         ticker,
-        period=f"{YEARS_OF_HISTORY}y",
+        period=f"{years}y",
         interval="1d",
         auto_adjust=True,
         progress=False,

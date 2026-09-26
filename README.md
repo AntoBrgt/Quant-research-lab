@@ -358,3 +358,28 @@ or click **Refresh 13F holdings from SEC** on the front page. New 13Fs appear qu
 - **Sizing** (`screener.quick_picks`): lose at most *max loss %* of the budget if the stop is hit (`shares = budget × risk% / (price − stop)`), never more than 20% of the budget in one line; long horizons with no price stop fall back to an equal split.
 - **SELL / avoid**: the most Unfavorable names -- sell if held (or keep the stop shown), don't buy.
 - Same cached ranking as the Opportunities page (`screener.get_ranking`), so it costs nothing extra once a horizon has been scored today. Click any row for the full Company Research view.
+
+## STEP 11 -- Backtest the ranking before any ML model
+
+"Is ML justified yet?" (STEP 6) listed the missing preconditions: a look-ahead-free label set and a harness that checks a signal against a baseline out of sample. `src/backtest/` builds both, and scores the **current** ranking with them first -- an ML model only earns a place in `screener.py` if it beats this baseline out of sample.
+
+```bash
+python src/run_backtest.py                              # current institutional universe, 10y of prices
+python src/run_backtest.py --tickers AAPL MSFT JPM ...  # any list
+python src/run_backtest.py --no-fundamentals            # technicals only, no yfinance fundamentals calls
+python src/run_backtest.py --reuse-panel                # re-evaluate the saved panel, no downloads
+```
+
+Outputs in `data/processed/backtest/`: `panel.parquet` (the future ML training set), `per_date.csv`, `report.md`.
+
+**Design**
+- **Point-in-time features** (`pit_features.py`): technicals through the same `as_of`-gated `market_features.py` functions; fundamentals only from `period_end + 90 days` (`--fundamental-lag-days`), because a statement can't be traded on before it's filed. Stale/delisted tickers get no features rather than a frozen snapshot.
+- **Scores = production code**: `score_full`/`score_technical` are `horizon.compute_horizon_weighted_view` itself (3-month horizon -> MEDIUM profile by default), so the backtest tests what the app ranks by -- not a re-implementation.
+- **Labels** (`labels.py`): 63-trading-day return minus SPY, entered at the close of the day *after* the signal.
+- **Evaluation** (`evaluate.py`): per-date rank IC, top-minus-bottom quintile spread, top-quintile hit rate; Newey-West t-stats (monthly rebalance + 3-month labels overlap); the app's Strong/Favorable/Neutral/Unfavorable buckets vs forward excess return; IC by year. Reference signals: 12-1 momentum and low volatility -- if the score can't beat one-line momentum, its complexity isn't paying.
+- `walk_forward_splits` (expanding window + embargo = label length) is ready for the ML stage.
+- Tests (`tests/test_backtest.py`) check that removing all data after a date leaves every feature on or before it unchanged, that fundamentals stay invisible until the lag passes, that labels enter the next day, and that a planted signal is detected while noise isn't.
+
+**Limits** (also printed in every report): the universe is today's 13F holdings (survivorship bias); yfinance fundamentals cover only ~4 fiscal years and are as-restated, so the fundamentals window starts ~3 years back while technicals cover the full history; forward P/E can't be reconstructed (valuation = FCF yield only); historical market cap is today's scaled by the price ratio; the 0.10 13F tilt is excluded (no 13F history ingested); spreads are gross of costs.
+
+**Reading the result**: rank IC > ~0.03 with a NW t-stat > 2 and Strong > Unfavorable in section 3 means the ranking carries real information; otherwise the Quick Picks labels are noise and the sizing on that page shouldn't be trusted with real money.

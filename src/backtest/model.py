@@ -161,11 +161,13 @@ def _predict_ridge(beta: np.ndarray, x: np.ndarray) -> np.ndarray:
     return beta[0] + x @ beta[1:]
 
 
-def model_splits(dates, label_days: int, rebalance_every: int, min_train: int = MIN_TRAIN_DATES, test_size: int = TEST_SIZE):
-    """The walk-forward folds: embargo = overlapping-label dates + 1, so the
+def model_splits(dates, label_days: int, rebalance_every: int, min_train: int = MIN_TRAIN_DATES, test_size: int = TEST_SIZE,
+                 embargo: Optional[int] = None):
+    """The walk-forward folds: embargo = overlapping-label dates + 1 (or larger, if given), so the
     last training label's return window ends before the first test date.
     """
-    embargo = evaluate.overlap_lags(label_days, rebalance_every) + 1
+    minimum = evaluate.overlap_lags(label_days, rebalance_every) + 1
+    embargo = minimum if embargo is None else max(embargo, minimum)
     return evaluate.walk_forward_splits(dates, min_train, test_size, embargo)
 
 
@@ -178,6 +180,8 @@ def walk_forward_predict(
     test_size: int = TEST_SIZE,
     num_trees: int = NUM_TREES,
     params: Optional[dict] = None,
+    embargo: Optional[int] = None,
+    pit_checked: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Out-of-sample `score_ml` / `score_linear` per (date, ticker), and feature importance.
 
@@ -187,7 +191,8 @@ def walk_forward_predict(
     """
     import lightgbm as lgb
 
-    require_pit_panel(panel)
+    if not pit_checked:  # a caller whose universe is point-in-time by construction (STEP 14a) says so explicitly
+        require_pit_panel(panel)
     features = check_features(features or FEATURES)
     params = {**LGBM_PARAMS, **(params or {})}
     panel = panel.reset_index(drop=True)
@@ -202,7 +207,7 @@ def walk_forward_predict(
     gains = []
 
     for fold, (train_dates, test_dates) in enumerate(
-        model_splits(panel["date"].unique(), label_days, rebalance_every, min_train, test_size)
+        model_splits(panel["date"].unique(), label_days, rebalance_every, min_train, test_size, embargo)
     ):
         train = panel["date"].isin(train_dates) & labelled
         test = panel["date"].isin(test_dates)

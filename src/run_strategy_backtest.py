@@ -3,6 +3,7 @@
     python src/run_strategy_backtest.py                 # weekly PIT panel, all variants, grid, ML, report
     python src/run_strategy_backtest.py --reuse-panel   # skip the panel build (prices/fundamentals)
     python src/run_strategy_backtest.py --seeds 20      # fewer random-entry seeds (faster, coarser percentile)
+    python src/run_strategy_backtest.py --reuse-panel --step13c   # STEP 13c: final pre-registered exit test
 
 Point-in-time 13F universe (--universe pit, STEP 11b) on weekly signal dates;
 entries at the next day's open; costs 0.10%/side + 0.05% slippage/side.
@@ -85,6 +86,102 @@ def random_distribution(candidates, result, closes, calendar, seeds, mask=None) 
     return pd.DataFrame(rows)
 
 
+# STEP 13c: pre-registered, final. Exactly these three exits, nothing else.
+STEP13C_HOLD = 20
+STEP13C_EXITS = {
+    "(a) trailing stop 2 ATR": strategy.Geometry("trail", STEP13C_HOLD, stop_atr=2.0),
+    "(b) trailing stop 3 ATR": strategy.Geometry("trail", STEP13C_HOLD, stop_atr=3.0),
+    "(c) target 2R / stop 1.5 ATR": strategy.Geometry("grid", STEP13C_HOLD, stop_atr=1.5, target_r=2.0),
+}
+
+
+def run_step13c(candidates, ohlc, closes, calendar, benchmark, seeds: int) -> str:
+    """score_rank entries, hold 20, three pre-registered exits; the "Is it luck?" verdict.
+
+    The verdict rule is STEP 13b's. With no grid, its robustness leg is applied to
+    the three pre-registered exits: >= 2/3 of them must have positive expectancy.
+    Entries: score_rank Strong/Favorable (the Quick Picks risk/reward filter is
+    defined on the 60-day-high target these exits replace, so it is not applied).
+    """
+    picks = strategy.weekly_picks(candidates, strategy.pick_score_rank, geometry_is_app=False)
+    rows, verdict_inputs, exposure_rows = [], [], []
+    for label, geometry in STEP13C_EXITS.items():
+        print(f"STEP 13c {label}: strategy + {seeds} random seeds ...", file=sys.stderr, flush=True)
+        result = strategy.outcomes(candidates, ohlc, geometry)
+        sim = strategy.simulate(candidates, result, picks, closes, calendar)
+        m = strategy.metrics(sim)
+        rnd = random_distribution(candidates, result, closes, calendar, seeds)
+        lo, hi = strategy.bootstrap_expectancy_ci(sim.trades)
+        pct = strategy.percentile_of(m.get("total_return", np.nan), rnd["total_return"])
+        if len(sim.trades):
+            sim.trades.to_parquet(STRATEGY_DIR / f"trades_13c_{geometry.key}.parquet")
+        spy_scaled = strategy.exposure_matched_benchmark(benchmark["adj_close"], sim.exposure)
+        rows.append({"exit": label, "trades": m.get("trades"), "expectancy_r": m.get("expectancy_r"),
+                     "ci95_low": lo, "ci95_high": hi, "random_percentile": pct,
+                     "random_median_return": rnd["total_return"].median(),
+                     "total_return": m.get("total_return"), "cagr": m.get("cagr"),
+                     "max_drawdown": m.get("max_drawdown"), "sharpe": m.get("sharpe"), "win_rate": m.get("win_rate")})
+        exposure_rows.append({"exit": label, "avg_exposure": spy_scaled.get("avg_exposure"),
+                              "strategy_return": m.get("total_return"), "strategy_cagr": m.get("cagr"),
+                              "spy_at_same_exposure_return": spy_scaled.get("total_return"),
+                              "spy_at_same_exposure_cagr": spy_scaled.get("cagr"),
+                              "cagr_gap": (m.get("cagr") or np.nan) - (spy_scaled.get("cagr") or np.nan)})
+        verdict_inputs.append((label, lo, hi, pct, m.get("expectancy_r")))
+
+    positive = sum(1 for *_, e in verdict_inputs if e is not None and e > 0)
+    robust_share = positive / len(verdict_inputs)
+    verdict_lines, verdicts, tradeable = [], [], []
+    for label, lo, hi, pct, _ in verdict_inputs:
+        ok_ci, ok_pct, ok_rob = np.isfinite(lo) and lo > 0, np.isfinite(pct) and pct >= IS_IT_LUCK_PERCENTILE, robust_share >= IS_IT_LUCK_GRID_SHARE
+        verdict = "TRADEABLE" if (ok_ci and ok_pct and ok_rob) else "NOT PROVEN"
+        verdicts.append(verdict)
+        if verdict == "TRADEABLE":
+            tradeable.append(label)
+        reasons = []
+        if not ok_ci:
+            reasons.append(f"expectancy CI [{lo:+.3f}, {hi:+.3f}] R includes 0 or is negative")
+        if not ok_pct:
+            reasons.append(f"beats {pct:.0f}% of random pickers with the same exits (needs >= {IS_IT_LUCK_PERCENTILE})")
+        if not ok_rob:
+            reasons.append(f"only {positive}/3 pre-registered exits have positive expectancy (needs >= 2/3)")
+        verdict_lines.append(f"- **{label}: {verdict}**" + (f" -- {'; '.join(reasons)}." if reasons else "."))
+    table = pd.DataFrame(rows).set_index("exit")
+    table["verdict"] = verdicts
+
+    final = (f"**Final result: TRADEABLE -- {', '.join(tradeable)}.**" if tradeable else
+             "**Final result: NONE of the pre-registered exits is TRADEABLE. The app's short-term loop has no demonstrated edge "
+             "after costs; no further strategy variants will be added.**")
+    lines = [
+        "# STEP 13c -- final, pre-registered exit test",
+        "",
+        f"- Entries: score_rank (the app's rank_score at {strategy.SHORT_HORIZON_DAYS} days), Strong/Favorable, top {strategy.TOP_K} "
+        f"per week, max {strategy.MAX_POSITIONS} positions, {strategy.RISK_PER_TRADE:.0%} equity risk per trade (cap "
+        f"{strategy.MAX_POSITION_WEIGHT:.0%}), next-day-open entry, max hold {STEP13C_HOLD} days, costs "
+        f"{barriers.COST_PER_SIDE:.2%} + {barriers.SLIPPAGE_PER_SIDE:.2%} per side.",
+        f"- Weekly signals {candidates['date'].min():%Y-%m-%d} -> {candidates['date'].max():%Y-%m-%d} "
+        f"({candidates['date'].nunique()} weeks), point-in-time 13F universe.",
+        "- Exits (pre-registered, no others): (a)/(b) chandelier trailing stop = highest high since entry (completed bars) "
+        "- k x ATR(14) at signal, never lowered, no target; (c) stop 1.5 ATR below the signal close, target 2x that risk.",
+        f"- Random baseline: {seeds} seeds of random weekly picks from the same universe with the SAME exits, sizing and limits.",
+        "- Verdict rule (STEP 13b, unchanged): expectancy 95% CI > 0 (bootstrap by week), >= 95th random percentile, and "
+        "robustness >= 2/3 -- with no grid, applied to the three pre-registered exits.",
+        "",
+        "## Is it luck?",
+        _fmt(table, PCT + ("random_median_return",)),
+        *verdict_lines,
+        "",
+        "## Return vs SPY at the strategy's average exposure",
+        "SPY held at the strategy's average invested fraction (rest in cash at 0%), same dates. "
+        "A negative `cagr_gap` means the loop did worse than simply holding that much SPY.",
+        "",
+        _fmt(pd.DataFrame(exposure_rows).set_index("exit"),
+             ("avg_exposure", "strategy_return", "strategy_cagr", "spy_at_same_exposure_return", "spy_at_same_exposure_cagr", "cagr_gap")),
+        final,
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--start", default="2019-03-01", help="First weekly signal date")
@@ -93,6 +190,7 @@ def main(argv=None) -> int:
     parser.add_argument("--no-fundamentals", action="store_true")
     parser.add_argument("--no-step13", action="store_true", help="Skip insider / best-ideas features for the ML filter")
     parser.add_argument("--reuse-panel", action="store_true")
+    parser.add_argument("--step13c", action="store_true", help="Only the final pre-registered exit test (report_13c.md)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -121,6 +219,13 @@ def main(argv=None) -> int:
     candidates, ohlc = strategy.build_candidates(panel, prices, calendar)
     closes = strategy.forward_filled_closes(ohlc)
     candidates.to_parquet(STRATEGY_DIR / "candidates.parquet")
+
+    if args.step13c:
+        report = run_step13c(candidates, ohlc, closes, calendar, benchmark, args.seeds)
+        (STRATEGY_DIR / "report_13c.md").write_text(report, encoding="utf-8")
+        print(report)
+        print(f"Saved: {STRATEGY_DIR / 'report_13c.md'}")
+        return 0
 
     # ---- 1. Main variants: the app's own levels, holds 5/10/20, with random-entry baselines
     main_rows, luck_rows, yearly_sections, results, sims = [], [], [], {}, {}

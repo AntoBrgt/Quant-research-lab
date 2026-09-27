@@ -242,3 +242,49 @@ def test_auc_and_calibration():
     p = pd.Series(rng.uniform(size=1000))
     table = barrier_model.calibration_table(pd.Series((rng.uniform(size=1000) < p).astype(int)), p)
     assert len(table) == 10 and table["actual_hit_rate"].iloc[-1] > table["actual_hit_rate"].iloc[0]
+
+
+# ---------------------------------------------------------------- STEP 13c trailing stop
+
+
+def _trail(rows, atr, k, max_hold=5, cost=0.0):
+    return barriers.walk_trailing_stop(_ohlc(rows), np.array([0]), np.array([atr]), k, max_hold, cost=cost).iloc[0]
+
+
+def test_trailing_stop_ratchets_up_from_completed_bars_only():
+    # signal close 100, ATR 2, k 2 -> initial stop 96.
+    rows = [(100, 100, 100, 100),
+            (100, 110, 99, 109),   # day 1: high 110; stop for this bar is still 96
+            (109, 109, 105, 106),  # day 2: stop now 110 - 4 = 106 -> low 105 touches it
+            (106, 107, 100, 101)]
+    out = _trail(rows, atr=2.0, k=2.0)
+    assert out["outcome"] == "stop" and out["exit_price"] == 106 and out["days_held"] == 2
+    assert out["r_multiple"] == pytest.approx(0.06 / 0.04)  # R uses the INITIAL risk (entry 100, stop 96)
+
+
+def test_trailing_stop_is_not_raised_by_the_bar_it_is_tested_on():
+    # Same bar makes a new high AND a low that would hit a stop raised by that high: must not exit.
+    rows = [(100, 100, 100, 100), (100, 120, 97, 100)]
+    out = _trail(rows, atr=2.0, k=2.0, max_hold=1)
+    assert out["outcome"] == "time" and out["exit_price"] == 100  # low 97 is above the initial 96; 116 only applies from the next bar
+    rows_next = rows + [(100, 101, 99, 100)]
+    assert _trail(rows_next, atr=2.0, k=2.0, max_hold=2)["exit_price"] == 100  # next bar opens below 116: stopped at the open
+
+
+def test_trailing_stop_gap_fills_at_open_and_never_moves_down():
+    rows = [(100, 100, 100, 100), (100, 112, 100, 111), (111, 111, 104, 105), (95, 96, 94, 95)]
+    out = _trail(rows, atr=2.0, k=2.0)
+    # stop after day 1 = 108; day 2 low 104 hits it at 108.
+    assert out["exit_price"] == 108
+    rows_gap = [(100, 100, 100, 100), (100, 112, 109, 111), (101, 102, 100, 101)]
+    assert _trail(rows_gap, atr=2.0, k=2.0)["exit_price"] == 101  # gapped below 108: filled at the open
+
+
+def test_exposure_matched_spy_scales_returns():
+    idx = pd.bdate_range("2021-01-01", periods=253)
+    spy = pd.Series(100 * 1.001 ** np.arange(253), index=idx)
+    half = strategy.exposure_matched_benchmark(spy, pd.Series(0.5, index=idx))
+    full = strategy.exposure_matched_benchmark(spy, pd.Series(1.0, index=idx))
+    assert half["avg_exposure"] == 0.5
+    assert full["total_return"] == pytest.approx(spy.iloc[-1] / spy.iloc[0] - 1)
+    assert half["total_return"] == pytest.approx(1.0005 ** 252 - 1)

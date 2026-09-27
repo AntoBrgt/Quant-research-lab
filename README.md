@@ -521,7 +521,20 @@ python src/run_backtest.py --reuse-panel --model          # re-evaluate; the sav
 - `company_tickers.json` is today's ticker map, so renamed or delisted issuers are missed.
 - Best ideas start with a single manager.
 
-**Results**: pending (the first `pit_broad` run is in progress).
+**First result** (top-500 PIT universe, 690 tickers, 90 monthly dates 2019-03 -> 2026-09; OOS: 51 dates from 2022-06, ~450 names/date): **no edge.**
+
+| Signal (same OOS rows) | Rank IC | NW t |
+|---|---|---|
+| score_ml | 0.011 | 0.36 |
+| score_rank | -0.009 | -0.40 |
+| momentum_12_1 | 0.026 | 0.82 |
+| log_market_cap | 0.035 | 2.36 |
+| insider_buyers_90d / net buy / cluster | 0.007 / 0.013 / 0.000 | 0.73 / 0.60 / 0.00 |
+| active_new_or_add / active_weight_max | -0.011 / -0.003 | -1.04 / -0.26 |
+
+- The insider and best-ideas features carry no standalone signal. LightGBM still ranks them at the top by gain, which is noise-fitting.
+- Only size is significant (large caps beat smaller ones in 2022-26, a known regime effect).
+- Promotion rule: fails all three checks (IC difference t 0.52 vs score_rank and -0.43 vs momentum; positive in 2 of 5 years).
 
 ## STEP 13b -- Trade-level backtest of the short-term loop + triple-barrier meta-labeling
 
@@ -584,4 +597,99 @@ Otherwise it is **NOT PROVEN**. The ML-filtered variant has no grid (its thresho
 - No partial fills, borrow or taxes.
 - Fundamentals are as restated by yfinance.
 
-**Results**: pending (the first run is in progress).
+**First result** (381 weekly signals 2019-03 -> 2026-09, ~106 members/week): **every variant NOT PROVEN.**
+
+| Hold 10, app levels | Total return | Max DD | Expectancy (R) [95% CI] | Beats random | Grid cells > 0 |
+|---|---|---|---|---|---|
+| score_rank (Quick Picks) | +15.1% | -29.2% | +0.005 [-0.055, +0.068] | 93% | 44% |
+| momentum_12_1 | -14.8% | -34.2% | -0.063 [-0.142, +0.014] | 69% | 85% |
+| breakout_20d | -40.7% | -41.9% | -0.048 [-0.090, -0.009] | 5% | 44% |
+| score_rank + ML filter (OOS dates) | -8.5% | -21.8% | -0.033 [-0.121, +0.058] | 90% | n/a |
+| SPY buy & hold (same period) | +209.8% | -33.7% | | | |
+| Equal-weight PIT universe | +162.9% | -35.5% | | | |
+
+- The best loop (score_rank, hold 20) made +27% in 7.5 years, against +210% for SPY.
+- score_rank is consistently above most random pickers (89-98th percentile across holds), but its expectancy CI always includes 0.
+- The grid's positive cells cluster at long holds and wide stops, i.e. closer to buy-and-hold in a rising market. The grid has no random baseline, so this is likely market drift rather than skill.
+- **The meta-label AUC of 0.88 is mechanical, not skill.** Target distance alone gives an AUC of 0.878: the app's target is the 60-day high, often < 1% away, so it gets "hit". In the top decile of P, the median target is 0.75% away and the mean R is -0.07 after costs. Predicting *hit* is not predicting *profit*, so the filter lowered expectancy. The next meta-label should predict R (or hit with a minimum reward), not the raw hit.
+- (The first generated report shows an equal-weight Sharpe of 1.73. That was a weekly series annualized as daily; the correct value is 0.77, fixed in `strategy.buy_and_hold`.)
+
+## STEP 13c -- Final, pre-registered exit test (FINAL RESULT)
+
+**Pre-registered before running.**
+- Entries: score_rank only (the app's rank_score at 14 days, Strong/Favorable), weekly top 5, max 10 positions, 1% equity risk per trade.
+- Execution: next-day-open entry, **hold 20**, costs 0.15%/side.
+- Three exits replacing the app's 60-day-high target, and no others: (a) chandelier trailing stop 2 ATR, (b) trailing stop 3 ATR, (c) fixed target 2R with a 1.5 ATR stop.
+- The random-entry baseline uses the **same** exits.
+- Verdict rule: unchanged from STEP 13b. With no grid, its robustness leg is applied to the three exits (>= 2 of 3 with positive expectancy).
+- The Quick Picks risk/reward filter is not applied, because it is defined on the target being replaced.
+
+```bash
+python src/run_strategy_backtest.py --reuse-panel --step13c     # -> data/processed/backtest/strategy/report_13c.md
+```
+
+Trailing stop = highest high since entry (completed bars only) - k x ATR(14) at the signal. It is never lowered, and a gap below it fills at the open. The R-multiple uses the initial risk.
+
+| Exit (hold 20) | Trades | Expectancy R [95% CI] | Beats random (same exits) | Return | Max DD | CAGR vs SPY at same avg exposure |
+|---|---|---|---|---|---|---|
+| (a) trailing 2 ATR | 1,110 | -0.025 [-0.101, +0.046] | 30% | -4.3% | -26.7% | -0.6% vs +11.1% |
+| (b) trailing 3 ATR | 959 | +0.053 [-0.012, +0.120] | 78% | +63.5% | -19.3% | +6.7% vs +11.8% |
+| (c) 2R / 1.5 ATR | 1,022 | -0.035 [-0.132, +0.059] | 52% | -6.2% | -34.1% | -0.8% vs +11.6% |
+
+Only 1 of the 3 exits has positive expectancy, and it lies within the random pickers' range (78th percentile). Its CI includes 0.
+
+**Final result: none of the pre-registered exits is TRADEABLE.** On a point-in-time, survivorship-aware universe, after costs, the app's short-term trading loop (buy score_rank picks, exit at stop, target or time) has **no demonstrated edge**. At the same average exposure (67-72% invested), every variant did worse than simply holding SPY: CAGR gap -5 to -12.5 points a year.
+
+**Per the pre-registration, no further strategy variants are added.** The Quick Picks warning stays: the ranking is a watchlist, not trade instructions.
+
+## PHASE 1 -- STEP 15 and STEP 14a (final research push)
+
+Both use the same machinery as before: point-in-time 13F universes (history rebuilt back to 2013-Q2, when 13F XML starts), next-open entries, costs, walk-forward with embargo, random baselines and NW t-stats. They also add two new free, point-in-time sources:
+- **SEC XBRL fundamentals** (`src/sec_xbrl.py`, from the bulk `companyfacts.zip`). Each value is usable from its filing date, and the earliest-filed value wins across tag switches. Year-to-date cash flows are differenced into quarters. This replaces yfinance statements, which only cover ~4-5 years and are as-restated.
+- **A 14-year price cache with the as-quoted close** (`backtest/data.load_ext_prices`), so market cap = quoted price x XBRL shares stays correct across splits.
+
+The verdict rules were fixed before running (see `value_survival.portfolio_verdict` and `run_smallcap.py`).
+
+### STEP 15 -- "Buy cheap quality, sell at target", survival models (`python src/run_value_survival.py`)
+- **Candidates**: the top 500 by 13F value, monthly 2013-08 -> 2026-09. A stock qualifies if it is >= 25% below its 52-week high, its P/S is below its own 5-year median (price-only when there are < 36 months of P/S history, flagged), and net margin > 0, FCF margin > 0 and net debt / market cap < 1. That gives 4,197 candidate-months across 401 tickers.
+- **Exits**: target +20/+30/+50%; a thesis break (2 consecutive quarters with negative FCF and revenue down year on year, known on the 2nd filing date); a 10-year cap. Training labels are censored at each fold's start: an open position is never a failure.
+- **Models** (walk-forward by entry year, 12-month embargo): Kaplan-Meier, Cox PH and XGBoost AFT. The pre-registered primary is XGBoost AFT at +30%.
+- **The models have almost no skill.** Out of sample, concordance is 0.52-0.54 (0.50 at +50%), and P(hit <= 12m) is badly overconfident: predicted 20-90%, actual 49-63%.
+- **The screen itself is where the returns come from, not the model.** Out of sample, candidates hit +20/+30/+50% in 76/67/55% of cases. Kaplan-Meier portfolios, which use no stock-level model, beat both ML models at every target.
+- **Primary portfolio (2017-2026)**: +8.1%/yr vs SPY +15.3% (first half 12.8% vs 18.3%, second half 3.6% vs 12.4%). It beats 76% of random-candidate portfolios. Sharpe is 0.53 vs 0.88. **DOES NOT BEAT MARKET** (fails all 5 checks).
+- **Coverage caveat**: in 2013-15 only ~63% of the top-500 CUSIPs resolve to a ticker (old CUSIPs of acquired or renamed companies), rising to 92% by 2025.
+
+### STEP 14a -- Small caps where institutions can't trade (`python src/run_smallcap.py`)
+- **Universe**: every common stock in the filers' full 13F books, with ETFs, funds and ADRs excluded. Market cap $200M-$2B (quoted price x XBRL shares), 20-day dollar volume > $1M, price > $3. That is 93,464 stock-months across 1,958 tickers (~400 names/month in 2013, ~860 in 2026). A rough 13F-implied cap (13F value / 20%) only decides which CUSIPs get looked up.
+- **Features and model**: the whitelist, plus SUE from XBRL EPS (dated by filing date), days since the last filing, and the 3-month change in 13F ownership breadth. LightGBM on per-date ranks, target = 63-day return minus IWM. Walk-forward with 36 training dates, test blocks of 6, embargo 4. OOS: 114 dates, 2016-12 -> 2026-06, ~636 names/date.
+- **Signal results**:
+  - score_ml rank IC is -0.001 (t -0.05), and its top-minus-bottom quintile spread is *negative* (t -2.4).
+  - Momentum is -0.007, SUE alone 0.004, linear 0.008.
+  - The only standalone signal with t > 2 is `insider_buyers_90d` (IC 0.013, t 2.09), borderline once 6 signals were tested.
+- **Portfolio** (top decile, 0.30%/side): **+6.4%/yr as priced, vs IWM +9.5% and SPY +15.2%** (first half 12.1 vs 12.7 / 18.0; second half 0.9 vs 6.4 / 12.5).
+- **Survivorship cases.** With unpriced members assumed to lose 50% or 100% per label period, the result is -66%/yr and -100%/yr.
+  - These bounds are extreme because "unpriced" here is mostly CUSIPs OpenFIGI can't map at all: 69% of the band in 2013, 17% in 2026. That includes some non-common shares. Only 27 of 2,898 tickers failed to download.
+  - The verdict does not depend on them: the strategy already trails IWM as priced.
+- **Verdict: DOES NOT BEAT MARKET** (fails all 3 checks: returns, IC difference vs momentum t 0.37, IC > 0 in 5 of 11 years).
+
+## PHASE 1 VERDICT
+
+Every strategy tested from STEP 11b to STEP 15, on point-in-time, survivorship-aware universes, after costs. "Annualized" is the strategy's own period.
+
+| Step | Strategy | Test | Annualized after costs | SPY / IWM, same period | Verdict |
+|---|---|---|---|---|---|
+| 11b | App rank_score, 3-month ranking (13F selection universe) | rank IC 0.020, t 0.69 | -- (ranking test, no portfolio) | -- | No edge |
+| 12 | LightGBM ranking (score_ml) | OOS rank IC 0.020, t 0.66 | -- (ranking test) | -- | Not promoted |
+| 13 | LightGBM + insider + best-ideas, top-500 universe | OOS rank IC 0.011, t 0.36 | -- (ranking test) | -- | Not promoted |
+| 13b | Short-term loop, app picks, hold 10 | expectancy +0.005R, CI [-0.055, +0.068] | +1.9% (2019-26) | SPY +16.1% | NOT PROVEN |
+| 13b | Short-term loop, 12-1 momentum, hold 10 | expectancy -0.063R | -2.1% | SPY +16.1% | NOT PROVEN |
+| 13b | Short-term loop, 20-day breakout, hold 10 | expectancy -0.048R | -6.7% | SPY +16.1% | NOT PROVEN |
+| 13b | App picks + meta-label ML filter | expectancy -0.033R | -1.6% (OOS dates) | SPY higher | NOT PROVEN |
+| 13c | App picks, trailing stop 2 ATR, hold 20 | expectancy -0.025R | -0.6% | SPY at same exposure +11.1% | NOT PROVEN |
+| 13c | App picks, trailing stop 3 ATR, hold 20 | expectancy +0.053R, CI [-0.012, +0.120] | +6.7% | SPY at same exposure +11.8% | NOT PROVEN |
+| 13c | App picks, 2R target / 1.5 ATR stop, hold 20 | expectancy -0.035R | -0.8% | SPY at same exposure +11.6% | NOT PROVEN |
+| 15 | Cheap quality + XGBoost survival, +30% (primary) | concordance 0.54 | +8.1% (2017-26) | SPY +15.3% | DOES NOT BEAT MARKET |
+| 15 | Same, best variant (no model, +50%) | -- | +10.1% | SPY +15.3% | DOES NOT BEAT MARKET |
+| 14a | Small-cap LightGBM, top decile | OOS rank IC -0.001, t -0.05 | +6.4% as priced; -66% in the -50% survivorship case | IWM +9.5%, SPY +15.2% | DOES NOT BEAT MARKET |
+
+**Conclusion.** Tested with point-in-time data, embargoed walk-forward validation, costs, random baselines and pre-registered verdict rules, none of the ranking, trading-loop, value/survival or small-cap strategies beat simply holding SPY. Several beat most random pickers (the STEP 15 screen and the app's short-term picks), but not the market. **Per the pre-registration, no further strategy variants are added.** The app stays a research and watchlist tool, and the Quick Picks warning stays.

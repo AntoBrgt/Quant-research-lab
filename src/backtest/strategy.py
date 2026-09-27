@@ -104,7 +104,7 @@ def build_candidates(
 @dataclass(frozen=True)
 class Geometry:
     """How stop/target are set: the app's own levels, or a grid cell."""
-    kind: str  # "app" or "grid"
+    kind: str  # "app", "grid" (fixed stop/target) or "trail" (trailing stop, no target)
     max_hold: int
     stop_atr: Optional[float] = None
     target_r: Optional[float] = None
@@ -113,6 +113,8 @@ class Geometry:
     def key(self) -> str:
         if self.kind == "app":
             return f"app_hold{self.max_hold}"
+        if self.kind == "trail":
+            return f"trail{self.stop_atr:g}atr_hold{self.max_hold}"
         return f"atr{self.stop_atr:g}_r{self.target_r:g}_hold{self.max_hold}"
 
 
@@ -120,6 +122,12 @@ def outcomes(candidates: pd.DataFrame, ohlc: dict[str, pd.DataFrame], geometry: 
     """Barrier outcome for every candidate under `geometry`, index-aligned with `candidates`."""
     parts = []
     for ticker, rows in candidates.groupby("ticker"):
+        if geometry.kind == "trail":
+            result = barriers.walk_trailing_stop(ohlc[ticker], rows["signal_pos"].to_numpy(),
+                                                 rows["atr_14d"].to_numpy(dtype=float), geometry.stop_atr, geometry.max_hold)
+            result.index = rows.index
+            parts.append(result)
+            continue
         if geometry.kind == "app":
             stop, target = rows["app_stop"].to_numpy(dtype=float), rows["app_target"].to_numpy(dtype=float)
         else:
@@ -183,6 +191,7 @@ class SimResult:
     skipped: int = 0
     not_opened: int = 0
     meta: dict = field(default_factory=dict)
+    exposure: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))  # invested value / equity, at each close
 
 
 def simulate(
@@ -214,7 +223,7 @@ def simulate(
     start = min(entries) - 1
     cash, equity_prev = 1.0, 1.0
     open_positions: list[dict] = []
-    trades, equity = [], []
+    trades, equity, exposure = [], [], []
     skipped = not_opened = 0
     for t in range(start, len(calendar)):
         for i in entries.get(t, []):
@@ -253,13 +262,17 @@ def simulate(
             else:
                 still_open.append(p)
         open_positions = still_open
-        marked = cash
+        invested = 0.0
         for p in open_positions:
             px = closes[p["ticker"]][t]
-            marked += p["shares"] * (px if np.isfinite(px) else p["exit_price"])
+            invested += p["shares"] * (px if np.isfinite(px) else p["exit_price"])
+        marked = cash + invested
         equity.append(marked)
+        exposure.append(invested / marked if marked > 0 else 0.0)
         equity_prev = marked
-    return SimResult(pd.Series(equity, index=calendar[start:]), pd.DataFrame(trades), skipped, not_opened)
+    index = calendar[start:]
+    return SimResult(pd.Series(equity, index=index), pd.DataFrame(trades), skipped, not_opened,
+                     exposure=pd.Series(exposure, index=index))
 
 
 def forward_filled_closes(ohlc: dict[str, pd.DataFrame]) -> dict[str, np.ndarray]:
@@ -347,9 +360,11 @@ def buy_and_hold(closes: pd.Series, start, end) -> dict:
     eq = s / s.iloc[0]
     years = (s.index[-1] - s.index[0]).days / 365.25
     total = float(eq.iloc[-1] - 1)
-    daily = eq.pct_change().dropna()
+    period = eq.pct_change().dropna()
+    # Annualize by the series' own frequency: the equal-weight curve is weekly, SPY daily.
+    periods_per_year = len(period) / years
     return {"total_return": total, "cagr": (1 + total) ** (1 / years) - 1, "max_drawdown": max_drawdown(eq),
-            "sharpe": float(daily.mean() / daily.std() * math.sqrt(252))}
+            "sharpe": float(period.mean() / period.std() * math.sqrt(periods_per_year))}
 
 
 def equal_weight_universe(candidates: pd.DataFrame, closes: dict[str, np.ndarray], calendar: pd.DatetimeIndex) -> pd.Series:
@@ -364,3 +379,21 @@ def equal_weight_universe(candidates: pd.DataFrame, closes: dict[str, np.ndarray
         value *= 1 + (np.mean(rets) if rets else 0.0)
         curve[d1] = value
     return pd.Series(curve)
+
+
+def exposure_matched_benchmark(bench_closes: pd.Series, exposure: pd.Series) -> dict:
+    """SPY held at the strategy's AVERAGE exposure (rest in cash at 0%), same period.
+
+    A loop that is 40% invested on average should be compared with 40% of SPY,
+    not 100%: otherwise "it trails SPY" partly just says "it holds less stock".
+    """
+    if exposure.empty:
+        return {}
+    avg = float(exposure.mean())
+    spy = bench_closes.loc[exposure.index[0]:exposure.index[-1]].dropna()
+    scaled = (1 + avg * spy.pct_change().fillna(0.0)).cumprod()
+    years = (spy.index[-1] - spy.index[0]).days / 365.25
+    total = float(scaled.iloc[-1] - 1)
+    daily = scaled.pct_change().dropna()
+    return {"avg_exposure": avg, "total_return": total, "cagr": (1 + total) ** (1 / years) - 1,
+            "max_drawdown": max_drawdown(scaled), "sharpe": float(daily.mean() / daily.std() * math.sqrt(252))}

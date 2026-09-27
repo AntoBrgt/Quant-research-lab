@@ -99,6 +99,80 @@ def grid_levels(close: np.ndarray, atr: np.ndarray, stop_atr: float, target_r: f
     return stop, close + target_r * (close - stop)
 
 
+def walk_trailing_stop(
+    ohlc: pd.DataFrame, signal_pos: np.ndarray, atr: np.ndarray, stop_atr: float, max_hold: int,
+    cost: Optional[float] = None,
+) -> pd.DataFrame:
+    """Chandelier trailing stop, no target (STEP 13c), for many trades on ONE ticker.
+
+    - Initial stop = signal close - stop_atr x ATR(14) at the signal (ATR fixed:
+      no later volatility is used).
+    - The stop in force on bar j is max(previous stop, highest HIGH from entry
+      through bar j-1 - stop_atr x ATR): it only uses completed bars, never
+      the bar it is tested on, and only moves up.
+    - Exit at the stop (at the open if the bar gaps below it), or at the close
+      of day `max_hold`, or at the last close if prices stop (`data_end`).
+    - Same entry and costs as `walk_barriers`; R-multiple uses the INITIAL risk.
+    """
+    o, h, l, c = (ohlc[col].to_numpy(dtype=float) for col in ("open", "high", "low", "close"))
+    signal_pos = np.asarray(signal_pos, dtype=int)
+    atr = np.asarray(atr, dtype=float)
+    n = len(signal_pos)
+    k = np.arange(max_hold)
+    idx = signal_pos[:, None] + 1 + k[None, :]
+    inside = idx < len(o)
+    safe = np.where(inside, idx, 0)
+    O, H, L, C = (np.where(inside, a[safe], np.nan) for a in (o, h, l, c))
+
+    signal_close = c[signal_pos]
+    initial_stop = signal_close - stop_atr * atr
+    entry = O[:, 0]
+    valid = np.isfinite(entry) & np.isfinite(initial_stop) & (initial_stop > 0) & (entry > initial_stop)
+
+    stop = initial_stop.copy()
+    highest = np.full(n, -np.inf)
+    done = ~valid
+    outcome = np.full(n, "time", dtype=object)
+    exit_k = np.full(n, max_hold - 1)
+    exit_price = np.full(n, np.nan)
+    for j in range(max_hold):
+        if j > 0:
+            highest = np.fmax(highest, H[:, j - 1])
+            stop = np.fmax(stop, highest - stop_atr * atr)
+        missing = ~done & ~np.isfinite(C[:, j])
+        if missing.any():
+            outcome[missing] = "data_end"
+            exit_k[missing] = max(j - 1, 0)
+            exit_price[missing] = C[missing, j - 1] if j > 0 else entry[missing]
+            done |= missing
+        gap = ~done & (j > 0) & (O[:, j] <= stop)
+        hit = ~done & ~gap & (L[:, j] <= stop)
+        for mask, price in ((gap, O[:, j]), (hit, stop)):
+            outcome[mask] = "stop"
+            exit_k[mask] = j
+            exit_price[mask] = price[mask]
+        done |= gap | hit
+    open_at_end = ~done
+    exit_price[open_at_end] = C[open_at_end, max_hold - 1]
+    outcome[~valid] = "skipped"
+
+    ret = np.where(valid, net_return(entry, exit_price, cost), np.nan)
+    risk = (entry - initial_stop) / entry
+    return pd.DataFrame({
+        "outcome": outcome,
+        "entry_pos": signal_pos + 1,
+        "exit_pos": signal_pos + 1 + exit_k,
+        "entry_price": entry,
+        "exit_price": np.where(valid, exit_price, np.nan),
+        "stop": initial_stop,
+        "target": np.nan,
+        "days_held": np.where(valid, exit_k + 1, np.nan),
+        "return": ret,
+        "r_multiple": np.where(valid, ret / risk, np.nan),
+        "y": np.where(valid, (ret > 0).astype(float), np.nan),
+    })
+
+
 def walk_barriers(
     ohlc: pd.DataFrame, signal_pos: np.ndarray, stop: np.ndarray, target: np.ndarray, max_hold: int,
     cost: Optional[float] = None,

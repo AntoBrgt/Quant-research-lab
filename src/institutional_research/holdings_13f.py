@@ -100,10 +100,10 @@ def sec_get(url: str) -> bytes:
     return response.content
 
 
-def load_filers(path: Optional[Path] = None) -> dict[str, int]:
+def load_filers(path: Optional[Path] = None, default: Optional[dict[str, int]] = None) -> dict[str, int]:
     path = path or config.RAW_DATA_DIR / "13f_filers.csv"
     if not path.exists():
-        return dict(DEFAULT_FILERS)
+        return dict(DEFAULT_FILERS if default is None else default)
     frame = pd.read_csv(path)
     missing = {"institution", "cik"} - set(frame.columns)
     if missing:
@@ -592,6 +592,43 @@ def _paced_resolve(resolve: Callable[[list[str]], dict], cusips: list[str], pace
     return results
 
 
+def _default_resolver() -> Callable[[list[str]], dict[str, Optional[dict]]]:
+    import security_master
+
+    return security_master.resolve_cusips
+
+
+def _quarterly_changes(
+    institution: str, cik: int, start_year: int, fetch: Fetcher
+) -> tuple[Optional[list[tuple[Filing13F, pd.DataFrame, Optional[pd.DataFrame]]]], int]:
+    """(filing, compare_quarters output, previous holdings) per quarter filed since `start_year`.
+
+    The quarter before the window is loaded too, so the first quarter in the
+    window has a prior to compare against rather than a NO_PRIOR. Returns
+    (None, 0) when the filer has no 13F-HR in the window.
+    """
+    start = f"{start_year}-01-01"
+    filings = sorted(list_13f_filings(cik, fetch, since=f"{start_year - 1}-01-01"), key=lambda f: f.report_date)
+    first = next((i for i, f in enumerate(filings) if f.filing_date >= start), None)
+    if first is None:
+        return None, 0
+
+    quarters = []
+    previous: Optional[pd.DataFrame] = None
+    failed = 0
+    for filing in filings[max(0, first - 1):]:
+        try:
+            holdings = load_holdings(filing, fetch)
+        except Exception as exc:  # one malformed filing never drops the filer's whole history
+            logger.warning("13F history: %s %s skipped (%s)", institution, filing.accession, exc)
+            failed += 1
+            continue
+        if filing.filing_date >= start:
+            quarters.append((filing, compare_quarters(holdings, previous), previous))
+        previous = holdings
+    return quarters, failed
+
+
 def build_filer_history(
     institution: str,
     cik: int,
@@ -612,31 +649,11 @@ def build_filer_history(
     understate survivorship bias.
     """
     pace = resolve is None
-    if resolve is None:
-        import security_master
-
-        resolve = security_master.resolve_cusips
-
-    start = f"{start_year}-01-01"
-    filings = sorted(list_13f_filings(cik, fetch, since=f"{start_year - 1}-01-01"), key=lambda f: f.report_date)
-    first = next((i for i, f in enumerate(filings) if f.filing_date >= start), None)
-    if first is None:
+    resolve = resolve or _default_resolver()
+    changes_by_quarter, failed = _quarterly_changes(institution, cik, start_year, fetch)
+    if changes_by_quarter is None:
         return [], {"institution": institution, "cik": cik, "status": f"no 13F-HR filed since {start_year}"}
-
-    quarters: list[tuple[Filing13F, pd.DataFrame, pd.DataFrame]] = []
-    previous: Optional[pd.DataFrame] = None
-    failed = 0
-    for filing in filings[max(0, first - 1):]:
-        try:
-            holdings = load_holdings(filing, fetch)
-        except Exception as exc:  # one malformed filing never drops the filer's whole history
-            logger.warning("13F history: %s %s skipped (%s)", institution, filing.accession, exc)
-            failed += 1
-            continue
-        if filing.filing_date >= start:
-            changes = compare_quarters(holdings, previous)
-            quarters.append((filing, changes, select_positions(changes, previous)))
-        previous = holdings
+    quarters = [(filing, changes, select_positions(changes, previous)) for filing, changes, previous in changes_by_quarter]
 
     cusips = sorted({c for _, _, selected in quarters for c in selected["cusip"]})
     resolutions = _paced_resolve(resolve, cusips, pace)
@@ -677,6 +694,70 @@ def build_filer_history(
         "rows": len(rows),
         "rows_without_ticker": sum(1 for r in rows if not r["ticker"]),
     }
+
+
+# Concentrated active managers for the "best ideas" features (STEP 13). An
+# index giant adding 10% to a position is fund flows; Berkshire adding 10% is
+# a decision. Override with data/raw/13f_active_managers.csv (institution, cik).
+DEFAULT_ACTIVE_MANAGERS: dict[str, int] = {"Berkshire": 1067983}
+
+
+def load_active_managers(path: Optional[Path] = None) -> dict[str, int]:
+    return load_filers(path or config.RAW_DATA_DIR / "13f_active_managers.csv", default=DEFAULT_ACTIVE_MANAGERS)
+
+
+POSITION_HISTORY_COLUMNS = [
+    "filing_date", "report_period", "institution", "cik", "accession", "cusip", "ticker",
+    "status", "weight", "adjusted_change",
+]
+
+
+def build_position_history(
+    managers: Optional[dict[str, int]] = None,
+    start_year: int = DEFAULT_HISTORY_START_YEAR,
+    fetch: Fetcher = sec_get,
+    resolve: Optional[Callable[[list[str]], dict[str, Optional[dict]]]] = None,
+) -> tuple[pd.DataFrame, list[dict]]:
+    """EVERY position (not just the selected top/movers) per quarter, for a few managers.
+
+    The best-ideas features need a manager's full book: its 40th-largest
+    position opened this quarter is exactly the kind of signal the universe
+    selection (top 30 + 10 movers) can miss. Same cached holdings and
+    `compare_quarters` as everywhere else; ETFs/funds dropped.
+    """
+    managers = managers or load_active_managers()
+    pace = resolve is None
+    resolve = resolve or _default_resolver()
+    rows: list[dict] = []
+    summaries: list[dict] = []
+    for institution, cik in managers.items():
+        try:
+            quarters, failed = _quarterly_changes(institution, cik, start_year, fetch)
+        except Exception as exc:
+            logger.exception("13F position history failed for %s (CIK %s)", institution, cik)
+            summaries.append({"institution": institution, "cik": cik, "status": f"error: {exc}"})
+            continue
+        if not quarters:
+            summaries.append({"institution": institution, "cik": cik, "status": f"no 13F-HR filed since {start_year}"})
+            continue
+        resolutions = _paced_resolve(resolve, sorted({c for _, ch, _ in quarters for c in ch["cusip"]}), pace)
+        before = len(rows)
+        for filing, changes, _ in quarters:
+            for row in changes.itertuples(index=False):
+                resolution = resolutions.get(row.cusip) or {}
+                if resolution.get("security_type") in EXCLUDED_SECURITY_TYPES:
+                    continue
+                adjusted = row.adjusted_change
+                rows.append({
+                    "filing_date": filing.filing_date, "report_period": filing.report_date,
+                    "institution": institution, "cik": cik, "accession": filing.accession,
+                    "cusip": row.cusip, "ticker": resolution.get("ticker") or None, "status": row.status,
+                    "weight": float(row.weight),
+                    "adjusted_change": None if adjusted is None or pd.isna(adjusted) else float(adjusted),
+                })
+        summaries.append({"institution": institution, "cik": cik, "status": "ok", "quarters": len(quarters),
+                          "filings_failed": failed, "rows": len(rows) - before})
+    return pd.DataFrame(rows, columns=POSITION_HISTORY_COLUMNS), summaries
 
 
 def build_universe_history(

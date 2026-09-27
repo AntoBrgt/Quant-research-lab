@@ -28,11 +28,13 @@ from __future__ import annotations
 import logging
 from typing import Callable, Iterable, Optional
 
+import numpy as np
 import pandas as pd
 
 import horizon
 import screener
 from backtest import labels, pit_features
+from institutional_research import holdings_13f
 from institutional_research import universe as inst_universe
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ WARMUP_DAYS = 252  # the 252-day return / 200-day MA need a year of history
 # $100M) would otherwise keep its last holdings in the universe forever.
 PIT_MAX_FILING_AGE_DAYS = 200
 
+UNIVERSES = ("current", "pit", "pit_broad")
 MEMBERSHIP_COLUMNS = ["date", "ticker", "cusip", "institution_count", "institutional_direction_score"]
 
 
@@ -134,6 +137,198 @@ def universe_coverage(membership: pd.DataFrame, panel: pd.DataFrame) -> pd.DataF
     return out
 
 
+BROAD_TOP_N = 500
+BROAD_CANDIDATE_POOL = 800  # CUSIPs ranked per date before ETFs/funds are removed (they rank high by value)
+# From 3 Jan 2023 the SEC requires 13F values in dollars; before, in thousands.
+# Summing across filers on one date mixes both around the switch unless normalized.
+THIRTEEN_F_DOLLAR_VALUES_FROM = "2023-01-03"
+
+
+def _latest_filings(filings: pd.DataFrame, date: pd.Timestamp, max_filing_age_days: int) -> pd.DataFrame:
+    window = filings[(filings["filing_date"] <= date) & (filings["filing_date"] >= date - pd.Timedelta(days=max_filing_age_days))]
+    return window.sort_values("filing_date").groupby("cik").tail(1)
+
+
+def pit_broad_universe(
+    history: pd.DataFrame,
+    dates: Iterable,
+    top_n: int = BROAD_TOP_N,
+    max_filing_age_days: int = PIT_MAX_FILING_AGE_DAYS,
+    holdings_loader: Optional[Callable] = None,
+    resolve: Optional[Callable[[list[str]], dict]] = None,
+    candidate_pool: int = BROAD_CANDIDATE_POOL,
+) -> pd.DataFrame:
+    """Broad point-in-time universe: the `top_n` stocks by total value across
+    the filers' latest FULL 13F holdings, per date.
+
+    Why: the selection universe (`pit_universe`, top 30 + movers per filer)
+    gives ~100 names a date -- too few for a cross-sectional test to detect a
+    small edge. The full holdings of the index giants cover the whole US
+    market, so their summed value is a point-in-time "largest US stocks" list
+    with the same availability rule (SEC filing date, 200-day staleness).
+
+    - Filings are indexed from `history` (built by `build_universe_history`);
+      each accession's holdings come from the per-accession parquet cache
+      (`holdings_13f.load_holdings`), so nothing already cached is re-downloaded.
+    - ETFs/funds are excluded via the CUSIP resolution's security type;
+      unresolved CUSIPs stay as members with ticker=None, counted by coverage.
+    - `institution_count` = filers holding it; `institutional_direction_score`
+      = the live aggregation over the filers' selected rows (0 if none).
+    """
+    if history is None or history.empty:
+        return pd.DataFrame(columns=MEMBERSHIP_COLUMNS + ["total_13f_value"])
+    pace = resolve is None
+    resolve = resolve or holdings_13f._default_resolver()
+    loader = holdings_loader or holdings_13f.load_holdings
+    history = history.assign(filing_date=pd.to_datetime(history["filing_date"]))
+    filings = history[["cik", "accession", "filing_date", "report_period"]].drop_duplicates(["cik", "accession"])
+
+    cache: dict[str, pd.DataFrame] = {}
+
+    def holdings(row) -> pd.DataFrame:
+        if row.accession not in cache:
+            filed = f"{row.filing_date:%Y-%m-%d}"
+            filing = holdings_13f.Filing13F(int(row.cik), row.accession, filed, str(row.report_period))
+            frame = loader(filing)[["cusip", "value"]].copy()
+            if filed < THIRTEEN_F_DOLLAR_VALUES_FROM:
+                frame["value"] = frame["value"] * 1000.0
+            cache[row.accession] = frame.assign(cik=int(row.cik))
+        return cache[row.accession]
+
+    candidates: dict[pd.Timestamp, pd.DataFrame] = {}
+    latest_by_date: dict[pd.Timestamp, set] = {}
+    for date in sorted(pd.Timestamp(d) for d in dates):
+        latest = _latest_filings(filings, date, max_filing_age_days)
+        if latest.empty:
+            continue
+        frames = []
+        for row in latest.itertuples(index=False):
+            try:
+                frames.append(holdings(row))
+            except Exception as exc:  # a filing that can't be loaded drops that filer for the date, not the run
+                logger.warning("pit_broad: holdings for %s unavailable (%s)", row.accession, exc)
+        if not frames:
+            continue
+        combined = pd.concat(frames, ignore_index=True)
+        agg = combined.groupby("cusip").agg(total_13f_value=("value", "sum"), institution_count=("cik", "nunique"))
+        candidates[date] = agg.nlargest(candidate_pool, "total_13f_value").reset_index()
+        latest_by_date[date] = set(latest["accession"])
+
+    all_cusips = sorted({c for frame in candidates.values() for c in frame["cusip"]})
+    resolutions = holdings_13f._paced_resolve(resolve, all_cusips, pace)
+    has_ticker = history["ticker"].notna() & history["ticker"].astype(str).str.strip().ne("")
+
+    rows = []
+    for date, cand in candidates.items():
+        info = [resolutions.get(c) or {} for c in cand["cusip"]]
+        cand = cand.assign(
+            ticker=[(i.get("ticker") or None) for i in info],
+            excluded=[i.get("security_type") in holdings_13f.EXCLUDED_SECURITY_TYPES for i in info],
+        )
+        cand = cand[~cand["excluded"]].copy()
+        cand["key"] = cand["ticker"].fillna("CUSIP:" + cand["cusip"])
+        members = (
+            cand.groupby("key")
+            .agg(ticker=("ticker", "first"), cusip=("cusip", "first"),
+                 total_13f_value=("total_13f_value", "sum"), institution_count=("institution_count", "max"))
+            .nlargest(top_n, "total_13f_value")
+        )
+        selected = history[history["accession"].isin(latest_by_date[date]) & has_ticker]
+        direction = {str(t).upper(): inst_universe.aggregate_direction(g["view_direction"])[0] for t, g in selected.groupby("ticker")}
+        for m in members.itertuples(index=False):
+            ticker = str(m.ticker).upper() if isinstance(m.ticker, str) and m.ticker else None
+            rows.append({
+                "date": date, "ticker": ticker, "cusip": m.cusip,
+                "institution_count": int(m.institution_count),
+                "institutional_direction_score": direction.get(ticker, 0.0) if ticker else None,
+                "total_13f_value": float(m.total_13f_value),
+            })
+    return pd.DataFrame(rows, columns=MEMBERSHIP_COLUMNS + ["total_13f_value"])
+
+
+ACTIVE_FEATURE_COLUMNS = ["active_new_or_add", "active_weight_max"]
+
+
+def active_manager_features(
+    keys: pd.DataFrame, position_history: pd.DataFrame, max_filing_age_days: int = PIT_MAX_FILING_AGE_DAYS
+) -> pd.DataFrame:
+    """Best-ideas 13F features per (date, ticker), from concentrated active managers.
+
+      active_new_or_add  1 if any listed manager's latest filing (filing_date <= date)
+                         opened the position or added > 10% flow-adjusted (status NEW/ADDED)
+      active_weight_max  largest portfolio weight among those managers (0 if none holds it)
+
+    NaN on dates where no listed manager has a filing in the staleness window
+    ("no information", not "not held").
+    """
+    out = keys[["date", "ticker"]].copy()
+    out["date"] = pd.to_datetime(out["date"])
+    if out.empty or position_history is None or position_history.empty:
+        return out.assign(**{c: np.nan for c in ACTIVE_FEATURE_COLUMNS})
+    ph = position_history.assign(filing_date=pd.to_datetime(position_history["filing_date"]))
+    ph = ph[ph["ticker"].notna()].assign(ticker=lambda f: f["ticker"].astype(str).str.upper())
+    filings = ph[["cik", "accession", "filing_date"]].drop_duplicates()
+
+    parts = []
+    for date in out["date"].unique():
+        latest = _latest_filings(filings, pd.Timestamp(date), max_filing_age_days)
+        if latest.empty:
+            continue
+        rows = ph[ph["accession"].isin(set(latest["accession"]))]
+        per_ticker = rows.groupby("ticker").agg(
+            active_new_or_add=("status", lambda s: float(s.isin(["NEW", "ADDED"]).any())),
+            active_weight_max=("weight", "max"),
+        ).reset_index()
+        keys_today = out.loc[out["date"] == date, ["date", "ticker"]].drop_duplicates()
+        merged = keys_today.merge(per_ticker, on="ticker", how="left")
+        parts.append(merged.fillna({"active_new_or_add": 0.0, "active_weight_max": 0.0}))
+    if not parts:
+        return out.assign(**{c: np.nan for c in ACTIVE_FEATURE_COLUMNS})
+    return out.merge(pd.concat(parts, ignore_index=True), on=["date", "ticker"], how="left")
+
+
+def add_step13_features(
+    panel: pd.DataFrame,
+    active_path,
+    insider_source: str = "bulk",
+    refresh_active: bool = False,
+    max_filing_age_days: int = PIT_MAX_FILING_AGE_DAYS,
+) -> pd.DataFrame:
+    """Insider (Form 4) and best-ideas (active managers' 13F) features, merged by (date, ticker).
+
+    Computed after the panel so they can be added to a saved panel without
+    re-downloading prices; both are point-in-time by SEC filing date. The
+    active managers' position history is cached at `active_path`.
+    """
+    import sys
+
+    import insider_form4
+
+    panel = panel.drop(columns=[c for c in insider_form4.FEATURE_COLUMNS + ACTIVE_FEATURE_COLUMNS if c in panel.columns])
+    keys = panel[["date", "ticker"] + (["log_market_cap"] if "log_market_cap" in panel.columns else [])]
+    first, last = panel["date"].min(), panel["date"].max()
+
+    print("STEP 13: Form 4 insider transactions ...", file=sys.stderr, flush=True)
+    transactions, ciks, coverage_end = insider_form4.load_transactions(
+        panel["ticker"].unique(), f"{first - pd.Timedelta(days=insider_form4.WINDOW_DAYS):%Y-%m-%d}", f"{last:%Y-%m-%d}",
+        source=insider_source,
+    )
+    insider = insider_form4.insider_features(keys, transactions, ciks, coverage_end)
+    print(f"  {len(transactions)} officer/director P/S rows; coverage to {coverage_end}", file=sys.stderr)
+
+    if refresh_active or not active_path.exists():
+        print("STEP 13: active managers' full 13F books ...", file=sys.stderr, flush=True)
+        positions, summaries = holdings_13f.build_position_history(start_year=first.year - 1)
+        for summary in summaries:
+            print(f"  {summary}", file=sys.stderr)
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        positions.to_parquet(active_path, index=False)
+    active = active_manager_features(keys, pd.read_parquet(active_path), max_filing_age_days)
+
+    return (panel.merge(insider, on=["date", "ticker"], how="left")
+                 .merge(active, on=["date", "ticker"], how="left"))
+
+
 def _score(technicals: dict, fundamentals: Optional[dict], horizon_days: int) -> Optional[float]:
     return horizon.compute_horizon_weighted_view(technicals or None, fundamentals, horizon_days)["score"]
 
@@ -153,24 +348,35 @@ def build_panel(
     universe: str = "current",
     universe_history: Optional[pd.DataFrame] = None,
     max_filing_age_days: int = PIT_MAX_FILING_AGE_DAYS,
+    membership: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """`universe="current"`: every ticker on every date. `universe="pit"`:
-    each ticker only on the dates it is a PIT member (`pit_universe`);
+    each ticker only on the dates it is a PIT member (`pit_universe`, or a
+    precomputed `membership`); `universe="pit_broad"`: same, with the
+    `pit_broad_universe` membership (required, it is expensive to build).
     `tickers`, if given, further restricts the members.
     """
-    if universe not in ("current", "pit"):
-        raise ValueError(f"universe must be 'current' or 'pit', got {universe!r}")
+    if universe not in UNIVERSES:
+        raise ValueError(f"universe must be one of {UNIVERSES}, got {universe!r}")
     benchmark = benchmark.sort_index()
     calendar = benchmark.index
     dates = rebalance_dates(calendar, rebalance_every, start=start, end=end)
     bench_closes = benchmark["adj_close"]
 
     member_scores: Optional[dict[str, dict]] = None
-    if universe == "pit":
-        if universe_history is None:
+    if universe != "current":
+        if membership is None and universe == "pit_broad":
+            raise ValueError("universe='pit_broad' needs a membership frame (dataset.pit_broad_universe)")
+        if membership is None and universe_history is None:
             raise ValueError("universe='pit' needs universe_history (holdings_13f.build_universe_history)")
-        membership = pit_universe(universe_history, dates, max_filing_age_days).dropna(subset=["ticker"])
-        member_scores = {t: dict(zip(g["date"], g["institutional_direction_score"])) for t, g in membership.groupby("ticker")}
+        if membership is None:
+            membership = pit_universe(universe_history, dates, max_filing_age_days)
+        membership = membership.dropna(subset=["ticker"])
+        membership = membership[membership["date"].isin(dates)]
+        member_scores = {
+            t: dict(zip(g["date"], zip(g["institutional_direction_score"], g["institution_count"])))
+            for t, g in membership.groupby("ticker")
+        }
         wanted = {t.upper() for t in tickers} if tickers else None
         tickers = [t for t in sorted(member_scores) if wanted is None or t in wanted]
     tickers = list(dict.fromkeys(t.upper() for t in tickers))
@@ -215,6 +421,8 @@ def build_panel(
                 **{k: v for k, v in tech.items() if k != "adj_close"},
                 **{k: v for k, v in fund.items() if k not in ("market_cap",)},
                 "has_fundamentals": has_fund,
+                # Explicit size feature: without it a model can use institution_count as a hidden size proxy.
+                "log_market_cap": float(np.log(fund["market_cap"])) if (fund.get("market_cap") or 0) > 0 else None,
                 "score_full": score_full,
                 "score_technical": _score(tech, None, horizon_days),
                 "label": screener.label_for(score_full),
@@ -223,9 +431,11 @@ def build_panel(
                 "fwd_excess": fwd_excess,
             }
             if member_scores is not None:
-                inst = member_scores[ticker][date] or 0.0
+                inst, count = member_scores[ticker][date]
+                inst = 0.0 if inst is None or pd.isna(inst) else float(inst)  # no directional row = MENTIONED (0), as live
                 # Same formula as screener._row_for: the production rank_score, and its label.
                 row["institutional_direction_score"] = inst
+                row["institution_count"] = count
                 row["score_rank"] = None if score_full is None else score_full + screener.INSTITUTIONAL_TILT * inst
                 row["label"] = screener.label_for(row["score_rank"])
             rows.append(row)

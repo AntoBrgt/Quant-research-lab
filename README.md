@@ -425,3 +425,163 @@ The first history build is slow: a few thousand SEC requests (<= ~7 req/s), plus
 - **13F = long US equity positions only**: no shorts, options, non-US holdings or intra-quarter trades; amendments (13F-HR/A) are ignored.
 - CUSIP -> ticker uses today's OpenFIGI mapping: a CUSIP retired after a merger may not resolve (counted as "no ticker"), and a ticker later reused by another company would price the wrong stock.
 - Filer CIKs change (BlackRock files under CIK 2012383 only since 2024; its earlier 13Fs are under 1364742), so a default filer list can have a shorter history than the start year suggests. Check the per-filer `first_filed` printed by `--build-universe-history`.
+
+## STEP 12 -- Learned model vs the baseline, out of sample only
+
+**Why.** The point-in-time backtest (STEP 11b) found no robust edge in the hand-weighted score. Over the full history, `score_rank` has a rank IC of 0.020 (NW t 0.7) and its labels are non-monotonic. 12-1 momentum reaches t 2.1 only in the 2023-26 window. Before re-weighting by hand, this step asks whether a model can **learn** a better cross-sectional ordering from the same point-in-time features, judged only on dates it never trained on.
+
+```bash
+python src/run_backtest.py --reuse-panel --model     # needs the --universe pit panel
+```
+
+**`src/backtest/model.py`**
+- **PIT panel only**: `require_pit_panel` refuses the current-universe panel, which is survivorship-biased.
+- **Features** are an explicit whitelist (`model.FEATURES`):
+  - technicals: returns, relative returns, volatility, volume ratio, price vs MA50/200, 12-1 momentum
+  - fundamentals: revenue/EPS/FCF growth, net and FCF margin, ROE, FCF yield, net debt
+  - point-in-time institutional: `institutional_direction_score`, `institution_count`
+
+  `fwd_*`, `score_*`, `label`, `date` and `ticker` can never enter the feature matrix. This is checked at import and on every call, and is tested.
+- **Per-date cross-sectional ranks** in [0, 1] for every feature and for the target (`fwd_excess`). Only the ordering within a date matters to a ranking, and ranks don't drift with market regimes. NaN stays NaN; fundamentals only exist from ~2022.
+- **`score_ml`**: LightGBM regressor with fixed, deliberately conservative parameters (15 leaves, >= 100 rows per leaf, learning rate 0.03, 300 trees, feature/bagging fraction 0.8, L2 1.0). There is no tuning on test folds.
+- **`score_linear`**: ridge regression on the same rank features (NaN -> 0.5). If LightGBM can't beat a linear model, its non-linearity isn't paying.
+- **Walk-forward** (`evaluate.walk_forward_splits`):
+  - expanding window, first 36 dates train-only, test blocks of 6 dates
+  - embargo = overlapping-label dates + 1 = 3 dates (63 trading days), so no training label's return window reaches a test date
+  - trained on labelled rows only; rows never in a test fold keep NaN
+- Outputs in `data/processed/backtest/`: `predictions.parquet` (date, ticker, fold, score_ml, score_linear) and `feature_importance.csv` (mean LightGBM gain across folds).
+
+**Report section 6.** It compares `score_ml`, `score_linear`, `score_rank`, `score_full`, `momentum_12_1` and `low_volatility` on **exactly the same rows** (those with an OOS `score_ml`). It also shows score_ml vs score_rank IC by year, the top-10 features, forward excess by `score_ml` quintile, and the promotion check below.
+
+**Promotion rule.** `score_ml` may replace `rank_score` in `screener.py` **only if** all of the following hold:
+1. against `score_rank` **and** against `momentum_12_1`: the Newey-West t-stat of the **per-date rank-IC difference** (score_ml minus that baseline, on the same rows and dates) is > 2. A higher mean alone isn't enough, because two noisy IC series can differ in mean by chance. score_ml's own t-stat is still printed, for information only;
+2. there are at least 4 OOS calendar years, and its mean rank IC is positive in at least 4 of them.
+
+(Revised in STEP 13. The first version compared means, required score_ml's own t > 2, and required 5 positive years, which with 5 OOS years meant every year.)
+
+The report evaluates this automatically (`model.promotion_check`). The model is **not** wired into the app in this step, whatever the verdict.
+
+**First result** (7-filer PIT panel, 49 OOS dates 2022-05 -> 2026-06, ~107 names/date): **score_ml does not qualify.**
+
+| Signal | OOS rank IC | NW t |
+|---|---|---|
+| score_ml | 0.020 | 0.66 |
+| score_rank | -0.012 | -0.36 |
+| momentum_12_1 | 0.045 | 1.07 |
+| score_linear | -0.069 | -2.54 |
+
+- score_ml's IC is positive in only 2 of 5 years, and its quintiles are flat except the bottom one.
+- The ridge baseline is significantly *negative*: relationships fitted in-sample reversed out of sample. That is a warning against hand re-weighting on this data too.
+- The Quick Picks page now carries a visible warning that the ranking has no demonstrated edge.
+
+## STEP 13 -- More power, new information
+
+**Why.** STEP 12 found no learnable edge, but the test was weak: ~107 names per date is a narrow cross-section, and every feature was a transform of prices, fundamentals everyone has, or 13F data that is 45+ days old. This step widens the universe and adds two sources of information that could plausibly carry a signal.
+
+```bash
+python src/run_backtest.py --universe pit_broad --start 2019-03-01 --model
+python src/run_backtest.py --reuse-panel --model          # re-evaluate; the saved panel remembers its universe
+```
+
+**1. Broad point-in-time universe (`--universe pit_broad`, `dataset.pit_broad_universe`).**
+- On each date, the universe is the **top 500 US stocks by total value** across the filers' latest **full** 13F holdings. Availability follows the same rules as STEP 11b: SEC filing date <= date, and a filing stops counting after 200 days.
+- ETFs and funds are excluded (by the CUSIP resolution's security type). Unresolved CUSIPs stay in as members with no ticker, and are counted by coverage (report section 0).
+- Holdings come from the per-accession parquet cache, so nothing already cached is downloaded again.
+- **13F value units**: filings made before 3 Jan 2023 report values in thousands of dollars, later ones in dollars. They are normalized before summing across filers, otherwise the ranking breaks around the switch.
+- `institution_count` is the number of filers holding the stock. `institutional_direction_score` uses the live aggregation over the filers' selected rows, and is 0 when none of them selected the stock.
+
+**2. Insider buying: SEC Form 4 (`src/insider_form4.py`).**
+- **What counts**: officer/director open-market purchases (`P`) and sales (`S`) only. Grants, option exercises, tax withholding and gifts are compensation plumbing, not decisions. 10% owners who are not officers or directors are dropped.
+- **Point-in-time** by SEC **filing** date, never the trade date.
+- **Features per (date, ticker)**, over a 90-day window:
+  - `insider_buyers_90d`: distinct buyers;
+  - `insider_net_buy_value_90d_mcap`: (purchase value - sale value) / market cap;
+  - `insider_cluster_buy`: 1 if there are >= 3 distinct buyers.
+- **Missing vs zero**: no filings means 0. A ticker without an issuer CIK, or a date past the data's coverage, gets NaN ("unknown" is not "nobody bought").
+- **Two sources**, same transaction table:
+  - `per-issuer` (as specified): ticker -> CIK via SEC `company_tickers.json`, the issuer's submissions JSON, then each Form 4's XML, cached per accession. That is one request per filing: ~300k requests, ~13 hours at SEC fair-access pacing for this backtest.
+  - `bulk` (default for the backtest): the SEC's quarterly Insider Transactions Data Sets. Same fields, one ~13 MB zip per quarter, parsed once and cached as parquet in `data/raw/form4/bulk/`.
+
+  Select with `--insider-source`.
+
+**3. Best-ideas 13F features.**
+- Concentrated active managers are listed in `data/raw/13f_active_managers.csv` (`institution,cik`; default Berkshire 1067983).
+- Their **full** books per quarter (`holdings_13f.build_position_history`, cached in `active_positions.parquet`) give:
+  - `active_new_or_add`: 1 if any listed manager opened the position, or added > 10% flow-adjusted, in its latest filing;
+  - `active_weight_max`: the largest portfolio weight among them.
+- NaN when no listed manager has a filing public yet.
+
+**4. Explicit size.** `log_market_cap` is a feature, so the model can't use `institution_count` as a hidden size proxy.
+
+**Report.** Section 6 now also lists each new feature as a **standalone signal** (rank IC and t-stat on the same OOS rows), next to score_ml, score_rank and momentum_12_1. The promotion rule was tightened (see STEP 12): it now uses the NW t of the per-date IC **difference**, and needs >= 4 OOS years with >= 4 of them positive.
+
+**Limits.**
+- The broad universe is large-cap by construction: top 500 by institutional value.
+- Form 4 bulk data sets are published after each quarter, so the latest weeks have no insider features.
+- `company_tickers.json` is today's ticker map, so renamed or delisted issuers are missed.
+- Best ideas start with a single manager.
+
+**Results**: pending (the first `pit_broad` run is in progress).
+
+## STEP 13b -- Trade-level backtest of the short-term loop + triple-barrier meta-labeling
+
+**Why.** The app's short-horizon use is a trading loop, not a 3-month ranking: buy the picks, exit at the stop or target the app shows, or after N days, then repeat. A loop can make or lose money independently of ranking IC (costs, stop placement, position limits), so it is tested as a loop, on the point-in-time universe (`--universe pit`).
+
+```bash
+python src/run_strategy_backtest.py                  # weekly PIT panel, all variants, grid, meta-labeling, report
+python src/run_strategy_backtest.py --reuse-panel    # skip the price/fundamentals panel build
+python src/run_strategy_backtest.py --seeds 20       # fewer random seeds (faster, coarser percentiles)
+```
+
+Outputs go to `data/processed/backtest/strategy/`: `report.md`, `grid.csv`, `trades_*.parquet`, `candidates.parquet`, `ml_probabilities.parquet`.
+
+**Labels (`src/backtest/barriers.py`).**
+- **Entry** at the **next day's open**. An entry that gaps through its stop or target is not taken.
+- **Levels** from the signal close via `risk_reward.compute_risk_reward` (the app's own levels at a 14-day horizon: 2.5x ATR stop or a tighter 60-day swing low; target = 60-day swing high, else 2R), or grid levels.
+- **Daily bars** are walked until the first barrier:
+  - stop and target in the same bar: **the stop wins**;
+  - a gap through the stop fills at the (worse) open;
+  - a gap through the target gets no extra credit;
+  - time exit at the close of the last hold day.
+- **Costs**: 0.10% + 0.05% slippage, **per side**.
+- Stored per trade: outcome, net return, R-multiple, days held, and y (1 if the target came first).
+
+**Strategy (`src/backtest/strategy.py`).**
+- **Rules**: each week, top 5 picks, max 10 open positions, 1% of equity at risk per trade (cap 20% per position).
+- **Variants**:
+  - `score_rank`: the app's rank_score at the 14-day horizon + the Quick Picks filter (Strong/Favorable, risk/reward >= 1);
+  - `momentum_12_1`;
+  - `breakout_20d`: close above the prior 20-day high, ranked by 20-day return.
+- Picks are fixed at the signal close. A pick that gaps is skipped, never replaced from further down the list.
+- **Metrics**: return, CAGR, max drawdown, Sharpe, win rate, average win/loss, expectancy (R), profit factor, trades, by year. Compared with SPY buy-and-hold and an equal-weight PIT-universe portfolio.
+- **Random-entry baseline**: the same exits, sizing and limits with random weekly picks from the same universe, 100 seeds (reproducible). The report gives the variant's percentile in that distribution.
+- **Grid**: stop 1.5/2/3 ATR x target 1.5/2/3 R x max hold 5/10/20. The full 27-cell expectancy grid is shown for each signal.
+
+**Meta-labeling (`src/backtest/barrier_model.py`).**
+- **Model**: a LightGBM classifier for P(target first). Features: the `model.FEATURES` whitelist as per-date ranks, plus trade geometry (stop distance %, target distance %, ATR %). Days to earnings is left out: there is no point-in-time earnings calendar.
+- **Training data**: every PIT member's barrier outcome, not only past picks (~5 picks a week is too few). Class imbalance is handled with `scale_pos_weight`.
+- **Walk-forward**: 104 weekly dates of training, then 26-date test blocks. The embargo is ceil(max hold / 5) + 1 weeks, and a training trade must have exited before the first test signal.
+- **Probabilities** are produced for every candidate on a test date. Whether an entry gaps is next-day information, so it never decides which names get a probability.
+- **Threshold** chosen on **training data only**: an inner split of the training window picks the probability cut-off that maximizes mean R.
+- **Report**: OOS AUC, a calibration table by decile, and top-decile precision vs the base rate. The filtered strategy is compared with the unfiltered one on the same OOS dates, with its own random baseline.
+
+**"Is it luck?"** Each variant shows its trade count, expectancy with a 95% CI (bootstrapped by week), random-entry percentile, and share of grid cells with positive expectancy. The verdict is **TRADEABLE** only if all three hold:
+- the expectancy CI is > 0 after costs;
+- the variant beats >= 95% of random pickers;
+- >= 2/3 of its grid cells are profitable.
+
+Otherwise it is **NOT PROVEN**. The ML-filtered variant has no grid (its threshold is tied to one geometry), so it cannot be TRADEABLE by this rule.
+
+**Tests** (`tests/test_strategy_backtest.py`) cover:
+- same-bar stop first, next-day-open entry, gap fills, gap-at-entry skip, and costs on both sides;
+- vectorized ATR/swing levels matching the app's `as_of` functions, and no candidate feature changing when post-signal prices change;
+- position limits and sizing, and a random baseline reproducible by seed;
+- the embargo, test-fold labels never affecting predictions or thresholds, and no label columns in the meta-features.
+
+**Limits.**
+- 13F-selected large caps only.
+- Daily bars can't order the stop and target within a day (the stop is assumed first).
+- No partial fills, borrow or taxes.
+- Fundamentals are as restated by yfinance.
+
+**Results**: pending (the first run is in progress).

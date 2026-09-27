@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 LONG_PRICES_DIR = config.RAW_DATA_DIR / "prices_long"
 BACKTEST_DIR = config.PROCESSED_DATA_DIR / "backtest"
+# Point-in-time 13F universe (STEP 11b) -- backtest-only, never read by the app.
+UNIVERSE_HISTORY_PATH = BACKTEST_DIR / "universe_history.parquet"
 DEFAULT_YEARS = 10
 
 
@@ -48,6 +50,10 @@ def load_raw_fundamentals(ticker: str) -> dict:
     import fundamentals
 
     return fundamentals.YFinanceFundamentalsProvider().get_raw_fundamentals(ticker)
+
+
+def load_universe_history() -> pd.DataFrame:
+    return pd.read_parquet(UNIVERSE_HISTORY_PATH)
 
 
 def universe_tickers() -> list[str]:

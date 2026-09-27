@@ -15,3 +15,4 @@ streamlit
 pytest
 pypdf
 plotly
+lightgbm

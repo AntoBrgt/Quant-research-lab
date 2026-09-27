@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 import horizon
+import screener
 from backtest import dataset, evaluate, labels, pit_features
 
 
@@ -220,3 +221,133 @@ def test_label_buckets_order_matches_app_labels():
     buckets = evaluate.label_buckets(panel)
     assert list(buckets.index) == ["Strong", "Favorable", "Neutral", "Unfavorable", "Insufficient data"]
     assert buckets.loc["Strong", "count"] == 2
+
+
+# --- point-in-time 13F universe (STEP 11b) ---------------------------------------
+
+def _history_row(filing_date, report_period, ticker, direction="MENTIONED", institution="F1", cik=1, cusip=None):
+    return {"filing_date": filing_date, "report_period": report_period, "institution": institution, "cik": cik,
+            "accession": f"{cik}-{filing_date}", "cusip": cusip or f"CUSIP_{ticker}", "ticker": ticker,
+            "view_direction": direction}
+
+
+def _members(history, dates, **kwargs) -> dict:
+    m = dataset.pit_universe(pd.DataFrame(history), [pd.Timestamp(d) for d in dates], **kwargs)
+    return {d: set(g["ticker"].dropna()) for d, g in m.groupby("date")}
+
+
+def test_ticker_filed_after_the_rebalance_date_is_never_in_that_dates_universe():
+    history = [_history_row("2020-02-14", "2019-12-31", "AAA"), _history_row("2020-05-15", "2020-03-31", "BBB")]
+    members = _members(history, ["2020-03-02", "2020-05-14"])
+    assert all("BBB" not in tickers for tickers in members.values())
+
+
+def test_quarter_enters_only_on_its_filing_date_not_its_quarter_end():
+    # Q1 2020 holdings (quarter end 2020-03-31) filed 45 days later.
+    history = [_history_row("2020-02-14", "2019-12-31", "OLD"), _history_row("2020-05-15", "2020-03-31", "NEW")]
+    members = _members(history, ["2020-03-31", "2020-04-30", "2020-05-14", "2020-05-15", "2020-06-15"])
+    for date in ["2020-03-31", "2020-04-30", "2020-05-14"]:
+        assert members[pd.Timestamp(date)] == {"OLD"}  # the previous filing is still the latest public one
+    assert members[pd.Timestamp("2020-05-15")] == {"NEW"}
+    assert members[pd.Timestamp("2020-06-15")] == {"NEW"}
+
+
+def test_nothing_is_in_the_universe_before_the_first_filing_and_stale_filers_drop_out():
+    history = [_history_row("2020-02-14", "2019-12-31", "AAA")]
+    members = _members(history, ["2020-01-15", "2020-03-02", "2021-06-01"], max_filing_age_days=200)
+    assert set(members) == {pd.Timestamp("2020-03-02")}
+
+
+def test_pit_direction_score_aggregates_filers_like_the_live_universe():
+    history = [_history_row("2020-02-14", "2019-12-31", "AAA", "POSITIVE", "F1", 1),
+               _history_row("2020-02-10", "2019-12-31", "AAA", "NEGATIVE", "F2", 2),
+               _history_row("2020-02-11", "2019-12-31", "AAA", "POSITIVE", "F3", 3)]
+    m = dataset.pit_universe(pd.DataFrame(history), [pd.Timestamp("2020-02-12"), pd.Timestamp("2020-03-02")])
+    by_date = m.set_index("date")["institutional_direction_score"]
+    assert by_date[pd.Timestamp("2020-02-12")] == pytest.approx(0.0)  # F1 not public yet
+    assert by_date[pd.Timestamp("2020-03-02")] == pytest.approx(round(1 / 3, 4))
+
+
+def _pit_setup():
+    bench = _random_walk(n=700, seed=9, start="2019-01-01")
+    series = {"AAA": _random_walk(n=700, seed=1, start="2019-01-01"), "BBB": _random_walk(n=700, seed=2, start="2019-01-01")}
+    history = pd.DataFrame([
+        _history_row("2020-02-14", "2019-12-31", "AAA", "POSITIVE"),
+        _history_row("2020-02-14", "2019-12-31", "DEAD"),  # delisted: yfinance has nothing
+        _history_row("2020-02-14", "2019-12-31", None, cusip="UNRESOLVED1"),  # CUSIP never mapped to a ticker
+        _history_row("2020-08-14", "2020-06-30", "AAA", "NEGATIVE"),
+        _history_row("2020-08-14", "2020-06-30", "BBB", "POSITIVE"),
+    ])
+    return bench, series, history
+
+
+def _pit_panel(bench, series, history, **kwargs):
+    def loader(ticker):
+        if ticker not in series:
+            raise ValueError(f"No price data for {ticker}")
+        return series[ticker]
+    return dataset.build_panel(None, price_loader=loader, fundamentals_loader=None, benchmark=bench,
+                               universe="pit", universe_history=history, **kwargs)
+
+
+def test_pit_panel_rows_only_on_member_dates_with_production_rank_score():
+    bench, series, history = _pit_setup()
+    panel = _pit_panel(bench, series, history)
+    assert panel.groupby("ticker")["date"].min()["BBB"] >= pd.Timestamp("2020-08-14")
+    assert panel["date"].min() >= pd.Timestamp("2020-02-14")
+    assert "DEAD" not in set(panel["ticker"])
+    scored = panel.dropna(subset=["score_full"])
+    expected = scored["score_full"] + screener.INSTITUTIONAL_TILT * scored["institutional_direction_score"]
+    pd.testing.assert_series_equal(scored["score_rank"].astype(float), expected, check_names=False)
+    early = panel[(panel["ticker"] == "AAA") & (panel["date"] < pd.Timestamp("2020-08-14"))]
+    late = panel[(panel["ticker"] == "AAA") & (panel["date"] >= pd.Timestamp("2020-08-14"))]
+    assert (early["institutional_direction_score"] == 1.0).all() and (late["institutional_direction_score"] == -1.0).all()
+    assert (panel["label"] == panel["score_rank"].map(screener.label_for)).all()
+
+
+def test_pit_panel_is_unchanged_when_later_filings_are_removed():
+    bench, series, history = _pit_setup()
+    cut = pd.Timestamp("2020-07-31")
+    full = _pit_panel(bench, series, history)
+    truncated = _pit_panel(bench, series, history[pd.to_datetime(history["filing_date"]) <= cut])
+    feature_cols = [c for c in full.columns if c not in ("fwd_return", "fwd_excess")]
+    a = full[full["date"] <= cut][feature_cols].reset_index(drop=True)
+    b = truncated[truncated["date"] <= cut][feature_cols].reset_index(drop=True)
+    pd.testing.assert_frame_equal(a, b, check_dtype=False)
+
+
+def test_coverage_counts_delisted_and_unresolved_members():
+    bench, series, history = _pit_setup()
+    panel = _pit_panel(bench, series, history)
+    dates = dataset.rebalance_dates(bench.index, dataset.DEFAULT_REBALANCE_EVERY)
+    membership = dataset.pit_universe(history, dates)
+    coverage = dataset.universe_coverage(membership, panel)
+    y2020 = coverage.loc[2020]
+    # Before Aug: AAA priced, DEAD unpriced, UNRESOLVED no ticker -> 3 members, 1 priced.
+    first = membership[membership["date"] < pd.Timestamp("2020-08-14")]
+    assert len(first) == 3 * first["date"].nunique()
+    assert 0 < y2020["pct_priced"] < 1 and y2020["pct_with_ticker"] < 1
+    assert y2020["tickers_never_priced"] == 1  # DEAD
+    assert y2020["avg_members_per_date"] > 2
+
+
+def test_pit_requires_history():
+    with pytest.raises(ValueError):
+        dataset.build_panel(None, price_loader=lambda t: None, fundamentals_loader=None,
+                            benchmark=_random_walk(n=300), universe="pit")
+
+
+def test_pit_report_shows_coverage_score_rank_and_flags_universe_drift():
+    import run_backtest
+
+    bench, series, history = _pit_setup()
+    panel = _pit_panel(bench, series, history)
+    membership = dataset.pit_universe(history, dataset.rebalance_dates(bench.index, dataset.DEFAULT_REBALANCE_EVERY))
+    coverage = dataset.universe_coverage(membership, panel)
+    report, _ = run_backtest.build_report(panel, 63, 21, 91, universe="pit", coverage=coverage)
+    assert "## 0. Universe size and price coverage by year" in report and "tickers_never_priced" in report
+    assert "| score_rank |" in report and "Mean fwd_excess of the whole universe" in report
+
+    drifting = panel.assign(fwd_excess=0.05)
+    report, _ = run_backtest.build_report(drifting, 63, 21, 91, universe="pit", coverage=coverage)
+    assert "NOT near 0" in report

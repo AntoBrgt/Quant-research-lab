@@ -7,8 +7,9 @@ per horizon per day), just presented as an order list.
 
 The sizing rule is fixed and visible: risk at most X% of the capital per
 trade if the stop is hit, never more than 20% of the capital in one line.
-None of this has been backtested yet -- it is the current evidence turned
-into an order list, not a performance promise.
+It is the current evidence turned into an order list, not a performance
+promise: the point-in-time backtest (README STEP 11b) found no statistically
+significant out-of-sample edge in this ranking, and the page says so up top.
 """
 
 from __future__ import annotations
@@ -28,8 +29,15 @@ import screener
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+BACKTEST_README_URL = "https://github.com/AntoBrgt/Quant-research-lab#step-11b----point-in-time-13f-universe-for-the-backtest"
+
 st.set_page_config(page_title="Quick Picks", layout="wide")
 st.title("Quick Picks")
+st.warning(
+    "**Backtest (STEP 11b): this ranking has shown no statistically significant edge out of sample. "
+    "Treat as a watchlist, not trade instructions.** "
+    f"[Details in the README]({BACKTEST_README_URL})"
+)
 st.caption("What to buy, at what price, how much -- and what to sell. The short version of the Opportunities ranking.")
 
 universe_df = pd.read_parquet(config.INSTITUTIONAL_UNIVERSE_PATH) if config.INSTITUTIONAL_UNIVERSE_PATH.exists() else pd.DataFrame()

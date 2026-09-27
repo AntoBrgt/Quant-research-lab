@@ -10,6 +10,7 @@ langchain-anthropic
 python-dotenv
 yfinance
 requests
+scipy
 streamlit
 pytest
 pypdf

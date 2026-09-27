@@ -8,7 +8,8 @@ forward return, out of sample? And does it beat trivially simple references
     data.py          long price history + raw fundamentals (own caches, never the app's)
     pit_features.py  features exactly as knowable on a past date (as_of + reporting lag)
     labels.py        forward excess return vs SPY, entered the day AFTER the signal
-    dataset.py       (date, ticker) panel: features + baseline scores + labels
+    dataset.py       (date, ticker) panel: features + baseline scores + labels,
+                     over a fixed list or the point-in-time 13F universe (STEP 11b)
     evaluate.py      IC / rank IC / quantile spread / label buckets / walk-forward splits
 
 Nothing here writes to the app's price/fundamentals caches or rankings, and

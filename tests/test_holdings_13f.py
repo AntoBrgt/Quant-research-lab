@@ -240,3 +240,100 @@ def test_needs_refresh_after_code_version_bump(isolated_data, monkeypatch):
     assert not h13f.needs_refresh()
     monkeypatch.setattr(h13f, "REFRESH_VERSION", "999")
     assert h13f.needs_refresh()
+
+
+# ---------------------------------------------------------------- history mode (STEP 11b)
+
+
+class PagedSEC:
+    """Submissions JSON whose older 13F-HRs sit on a `filings.files` page, like large real filers."""
+
+    def __init__(self, cik, recent, older, page_filing_to):
+        # recent / older: lists of (accession, filing_date, report_date, xml_bytes)
+        self.cik, self.recent, self.older, self.page_filing_to = cik, recent, older, page_filing_to
+        self.calls = []
+
+    @staticmethod
+    def _block(quarters):
+        return {
+            "form": ["13F-HR"] * len(quarters),
+            "accessionNumber": [q[0] for q in quarters],
+            "filingDate": [q[1] for q in quarters],
+            "reportDate": [q[2] for q in quarters],
+        }
+
+    def __call__(self, url):
+        self.calls.append(url)
+        if url.endswith(f"CIK{self.cik:010d}.json"):
+            files = [{"name": "CIK-page-001.json", "filingFrom": "2015-01-01", "filingTo": self.page_filing_to}]
+            return json.dumps({"filings": {"recent": self._block(self.recent), "files": files}}).encode()
+        if url.endswith("CIK-page-001.json"):
+            return json.dumps(self._block(self.older)).encode()
+        for acc, _, _, xml in self.recent + self.older:
+            nodash = acc.replace("-", "")
+            if url.endswith(f"{nodash}/index.json"):
+                return json.dumps({"directory": {"item": [{"name": "infotable.xml"}]}}).encode()
+            if url.endswith(f"{nodash}/infotable.xml"):
+                return xml
+        raise AssertionError(f"unexpected URL {url}")
+
+
+def _quarter(apple_shares, msft_shares):
+    return _table([_info_row("APPLE INC", "037833100", apple_shares, apple_shares * 100),
+                   _info_row("MICROSOFT CORP", "594918104", msft_shares, msft_shares * 100),
+                   _info_row("GONE CORP", "000000001", 50, 5_000)])
+
+
+def _paged_sec():
+    recent = [("0001-20-000003", "2020-08-14", "2020-06-30", _quarter(300, 100)),
+              ("0001-20-000002", "2020-05-15", "2020-03-31", _quarter(200, 100))]
+    older = [("0001-20-000001", "2020-02-14", "2019-12-31", _quarter(100, 100)),
+             ("0001-19-000009", "2019-11-14", "2019-09-30", _quarter(100, 100))]
+    return PagedSEC(1067983, recent, older, page_filing_to="2020-02-14")
+
+
+def test_live_listing_does_not_follow_pages_when_recent_has_two_quarters():
+    sec = _paged_sec()
+    filings = h13f.list_13f_filings(1067983, sec)
+    assert [f.report_date for f in filings] == ["2020-06-30", "2020-03-31"]
+    assert not any("page" in url for url in sec.calls)
+
+
+def test_history_listing_follows_older_pages():
+    sec = _paged_sec()
+    filings = h13f.list_13f_filings(1067983, sec, since="2019-01-01")
+    assert [f.report_date for f in filings] == ["2020-06-30", "2020-03-31", "2019-12-31", "2019-09-30"]
+    # A page that ends before `since` is never fetched.
+    sec_old = PagedSEC(1067983, sec.recent, sec.older, page_filing_to="2018-12-31")
+    h13f.list_13f_filings(1067983, sec_old, since="2019-06-30")
+    assert not any("page" in url for url in sec_old.calls)
+
+
+def test_filer_history_uses_the_sec_filing_date_and_a_prior_quarter(isolated_data):
+    rows, summary = h13f.build_filer_history("Berkshire", 1067983, start_year=2020, fetch=_paged_sec(), resolve=_fake_resolver)
+    frame = pd.DataFrame(rows)
+    assert summary["status"] == "ok" and summary["quarters"] == 3  # filed 2020-02-14, 05-15, 08-14
+    # The 2019-12-31 quarter becomes public on its filing date, not on the quarter end.
+    assert set(frame["filing_date"]) == {"2020-02-14", "2020-05-15", "2020-08-14"}
+    assert dict(zip(frame["filing_date"], frame["report_period"]))["2020-05-15"] == "2020-03-31"
+    # First quarter in the window is compared with the one before it (loaded, not emitted).
+    assert "NO_PRIOR" not in set(frame["status"])
+    q2 = frame[frame["filing_date"] == "2020-05-15"].set_index("company_name")
+    assert q2.loc["APPLE INC", "view_direction"] == "POSITIVE"
+    # Unresolved CUSIPs stay in the history (ticker None) so coverage can count them.
+    assert frame.loc[frame["company_name"] == "GONE CORP", "ticker"].isna().all()
+    assert summary["rows_without_ticker"] == 3
+
+
+def test_universe_history_never_touches_live_mentions(isolated_data):
+    history, summaries = h13f.build_universe_history({"Berkshire": 1067983}, 2020, fetch=_paged_sec(), resolve=_fake_resolver)
+    assert list(history.columns) == h13f.HISTORY_COLUMNS and not history.empty
+    assert not config.INSTITUTIONAL_MENTIONS_PATH.exists()
+
+
+def test_zero_reported_value_does_not_crash_split_detection():
+    # Real State Street filing: a prior-quarter row with shares but value 0 -> implied price ratio = inf.
+    prev = _holdings([("A", "A", "COM", 100, 0), ("B", "B", "COM", 100, 1000)])
+    cur = _holdings([("A", "A", "COM", 100, 1000), ("B", "B", "COM", 100, 1000)])
+    changes = h13f.compare_quarters(cur, prev).set_index("cusip")
+    assert changes.loc["A", "split_factor"] == 1.0

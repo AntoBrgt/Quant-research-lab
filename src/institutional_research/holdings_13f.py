@@ -18,6 +18,10 @@ Pipeline (one call: `refresh_13f_mentions()`):
         -> CUSIP -> ticker via security_master (OpenFIGI, cached)
         -> InstitutionalMention rows (report_type="13F")
 
+History mode (`build_universe_history()`, STEP 11b): the same per-quarter
+pipeline over every filing since a start year, keyed by SEC filing date, for
+the backtest's point-in-time universe. It never writes the live mentions.
+
 Honesty rules, same as the rest of this project:
 - A holding is not a recommendation. `view_direction` describes what the
   filer *did* (added/cut/opened/exited), never "BUY".
@@ -35,6 +39,7 @@ Honesty rules, same as the rest of this project:
 from __future__ import annotations
 
 import json
+import math
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -140,21 +145,31 @@ def _filings_from_block(block: dict, cik: int) -> list[Filing13F]:
     return out
 
 
-def list_13f_filings(cik: int, fetch: Fetcher = sec_get) -> list[Filing13F]:
+def list_13f_filings(cik: int, fetch: Fetcher = sec_get, since: Optional[str] = None) -> list[Filing13F]:
     """All original 13F-HR filings for a filer, newest quarter first.
 
     Large filers (e.g. BlackRock files thousands of 13G/Ds) can push their
     13F-HRs out of the `recent` block; older pages under `filings.files` are
     only fetched when `recent` doesn't contain at least two quarters.
+
+    `since` (ISO date, history mode for the backtest): instead, follow every
+    older page that can hold a filing dated on/after `since` (pages carry a
+    `filingTo` date), and return only quarters with `report_date >= since`.
+    `since=None` is the live app's path, unchanged.
     """
     data = json.loads(fetch(SUBMISSIONS_URL.format(cik=cik)))
     filings = _filings_from_block(data.get("filings", {}).get("recent", {}), cik)
 
     for page in data.get("filings", {}).get("files", []):
-        if len({f.report_date for f in filings}) >= 2:
+        if since is None and len({f.report_date for f in filings}) >= 2:
             break
+        if since is not None and page.get("filingTo") and page["filingTo"] < since:
+            continue  # the whole page predates the history window
         page_data = json.loads(fetch(SUBMISSIONS_PAGE_URL.format(name=page["name"])))
         filings.extend(_filings_from_block(page_data, cik))
+
+    if since is not None:
+        filings = [f for f in filings if f.report_date >= since]
 
     # One filing per quarter: if a quarter has several originals, keep the latest-filed.
     by_quarter: dict[str, Filing13F] = {}
@@ -284,7 +299,8 @@ def _split_factor(share_ratio: float, price_ratio: float) -> float:
     quarter. Without this, every split would look like massive buying.
     Returns the factor to divide the share ratio by (1.0 = no split).
     """
-    if not (price_ratio > 0 and share_ratio > 0):
+    # A zero reported value (seen in real filings) makes the implied price 0 or inf: no split inference.
+    if not (price_ratio > 0 and share_ratio > 0 and math.isfinite(price_ratio) and math.isfinite(share_ratio)):
         return 1.0
     forward = 1.0 / price_ratio  # e.g. 4.0 after a 4:1 split
     k = round(forward)
@@ -539,6 +555,160 @@ def merge_13f_mentions(new_13f: pd.DataFrame, output_path: Path = None) -> pd.Da
         combined = new_13f
     combined.to_parquet(output_path, index=False)
     return combined
+
+
+# ----------------------------------------------------------------------------
+# History mode (STEP 11b): every quarter since a start year, for the backtest
+# ----------------------------------------------------------------------------
+#
+# The live app only needs "what did each filer do last quarter". A backtest
+# needs "what would the universe have been on date D" -- which requires every
+# past filing, and the date it became *public* (the SEC filing date, up to 45
+# days after the quarter end), not the quarter it describes. Applying today's
+# holdings to 2017 is survivorship + look-ahead bias in the universe itself.
+
+HISTORY_COLUMNS = [
+    "filing_date", "report_period", "institution", "cik", "accession", "cusip", "ticker",
+    "company_name", "status", "view_direction", "confidence", "value", "weight", "adjusted_change",
+]
+DEFAULT_HISTORY_START_YEAR = 2016
+# Unauthenticated OpenFIGI allows 25 requests/min (10 CUSIPs each). The live
+# refresh stays under that by size; a multi-year history does not, and a
+# rate-limited batch comes back as "unresolved" -- which would silently look
+# like a delisted name. So history resolution is paced here.
+OPENFIGI_CHUNK = 10
+OPENFIGI_MIN_SECONDS_PER_CHUNK = 2.6
+_NETWORK_CALL_SECONDS = 0.3  # a chunk slower than this hit OpenFIGI (cached chunks are instant)
+
+
+def _paced_resolve(resolve: Callable[[list[str]], dict], cusips: list[str], pace: bool) -> dict[str, Optional[dict]]:
+    results: dict[str, Optional[dict]] = {}
+    for start in range(0, len(cusips), OPENFIGI_CHUNK):
+        began = time.monotonic()
+        results.update(resolve(cusips[start : start + OPENFIGI_CHUNK]))
+        elapsed = time.monotonic() - began
+        if pace and elapsed > _NETWORK_CALL_SECONDS:
+            time.sleep(max(0.0, OPENFIGI_MIN_SECONDS_PER_CHUNK - elapsed))
+    return results
+
+
+def build_filer_history(
+    institution: str,
+    cik: int,
+    start_year: int = DEFAULT_HISTORY_START_YEAR,
+    fetch: Fetcher = sec_get,
+    resolve: Optional[Callable[[list[str]], dict[str, Optional[dict]]]] = None,
+) -> tuple[list[dict], dict]:
+    """One row per selected position per quarter filed since `start_year`.
+
+    Same per-quarter pipeline as the live refresh (cached holdings,
+    `compare_quarters`, `select_positions`, direction mapping, ETF/fund
+    exclusion) applied to each consecutive pair of filings. The quarter
+    before the window is loaded too, so the first quarter in the window has
+    a prior to compare against rather than a NO_PRIOR.
+
+    Positions whose CUSIP does not resolve to a ticker are kept (ticker=None):
+    they are universe members the backtest can't price, and hiding them would
+    understate survivorship bias.
+    """
+    pace = resolve is None
+    if resolve is None:
+        import security_master
+
+        resolve = security_master.resolve_cusips
+
+    start = f"{start_year}-01-01"
+    filings = sorted(list_13f_filings(cik, fetch, since=f"{start_year - 1}-01-01"), key=lambda f: f.report_date)
+    first = next((i for i, f in enumerate(filings) if f.filing_date >= start), None)
+    if first is None:
+        return [], {"institution": institution, "cik": cik, "status": f"no 13F-HR filed since {start_year}"}
+
+    quarters: list[tuple[Filing13F, pd.DataFrame, pd.DataFrame]] = []
+    previous: Optional[pd.DataFrame] = None
+    failed = 0
+    for filing in filings[max(0, first - 1):]:
+        try:
+            holdings = load_holdings(filing, fetch)
+        except Exception as exc:  # one malformed filing never drops the filer's whole history
+            logger.warning("13F history: %s %s skipped (%s)", institution, filing.accession, exc)
+            failed += 1
+            continue
+        if filing.filing_date >= start:
+            changes = compare_quarters(holdings, previous)
+            quarters.append((filing, changes, select_positions(changes, previous)))
+        previous = holdings
+
+    cusips = sorted({c for _, _, selected in quarters for c in selected["cusip"]})
+    resolutions = _paced_resolve(resolve, cusips, pace)
+
+    rows: list[dict] = []
+    for filing, changes, selected in quarters:
+        for _, row in selected.iterrows():
+            resolution = resolutions.get(row["cusip"]) or {}
+            if resolution.get("security_type") in EXCLUDED_SECURITY_TYPES:
+                continue
+            direction, confidence = _STATUS_TO_DIRECTION[row["status"]]
+            adjusted = row.get("adjusted_change")
+            rows.append({
+                "filing_date": filing.filing_date,
+                "report_period": filing.report_date,
+                "institution": institution,
+                "cik": cik,
+                "accession": filing.accession,
+                "cusip": row["cusip"],
+                "ticker": resolution.get("ticker") or None,
+                "company_name": row["name_of_issuer"],
+                "status": row["status"],
+                "view_direction": direction,
+                "confidence": confidence,
+                "value": float(row["value"]),
+                "weight": float(row["weight"]),
+                "adjusted_change": None if adjusted is None or pd.isna(adjusted) else float(adjusted),
+            })
+
+    return rows, {
+        "institution": institution,
+        "cik": cik,
+        "status": "ok",
+        "quarters": len(quarters),
+        "first_filed": quarters[0][0].filing_date if quarters else None,
+        "last_filed": quarters[-1][0].filing_date if quarters else None,
+        "filings_failed": failed,
+        "rows": len(rows),
+        "rows_without_ticker": sum(1 for r in rows if not r["ticker"]),
+    }
+
+
+def build_universe_history(
+    filers: Optional[dict[str, int]] = None,
+    start_year: int = DEFAULT_HISTORY_START_YEAR,
+    fetch: Fetcher = sec_get,
+    resolve: Optional[Callable[[list[str]], dict[str, Optional[dict]]]] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> tuple[pd.DataFrame, list[dict]]:
+    """Every filer's quarterly selections since `start_year`, as one frame.
+
+    Never touches `institutional_mentions.parquet` or the live universe: the
+    caller (run_backtest.py) writes the result under data/processed/backtest/.
+    """
+    filers = filers or load_filers()
+    all_rows: list[dict] = []
+    summaries: list[dict] = []
+    for institution, cik in filers.items():
+        if progress:
+            progress(institution)
+        try:
+            rows, summary = build_filer_history(institution, cik, start_year, fetch, resolve)
+        except Exception as exc:  # network, parsing, SEC outage -- report, don't lose the other filers
+            logger.exception("13F history failed for %s (CIK %s)", institution, cik)
+            rows, summary = [], {"institution": institution, "cik": cik, "status": f"error: {exc}"}
+        all_rows.extend(rows)
+        summaries.append(summary)
+
+    frame = pd.DataFrame(all_rows, columns=HISTORY_COLUMNS)
+    if not frame.empty:
+        frame = frame.sort_values(["filing_date", "institution", "value"], ascending=[True, True, False]).reset_index(drop=True)
+    return frame, summaries
 
 
 # Bump when a code change means previously built 13F mentions should be rebuilt

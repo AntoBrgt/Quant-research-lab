@@ -380,6 +380,48 @@ Outputs in `data/processed/backtest/`: `panel.parquet` (the future ML training s
 - `walk_forward_splits` (expanding window + embargo = label length) is ready for the ML stage.
 - Tests (`tests/test_backtest.py`) check that removing all data after a date leaves every feature on or before it unchanged, that fundamentals stay invisible until the lag passes, that labels enter the next day, and that a planted signal is detected while noise isn't.
 
-**Limits** (also printed in every report): the universe is today's 13F holdings (survivorship bias); yfinance fundamentals cover only ~4 fiscal years and are as-restated, so the fundamentals window starts ~3 years back while technicals cover the full history; forward P/E can't be reconstructed (valuation = FCF yield only); historical market cap is today's scaled by the price ratio; the 0.10 13F tilt is excluded (no 13F history ingested); spreads are gross of costs.
+**Limits** (also printed in every report): with `--universe current` the universe is today's 13F holdings (survivorship bias -- fixed by the point-in-time universe, STEP 11b); yfinance fundamentals cover only ~4 fiscal years and are as-restated, so the fundamentals window starts ~3 years back while technicals cover the full history; forward P/E can't be reconstructed (valuation = FCF yield only); historical market cap is today's scaled by the price ratio; the 0.10 13F tilt is only tested in `pit` mode (STEP 11b); spreads are gross of costs.
 
 **Reading the result**: rank IC > ~0.03 with a NW t-stat > 2 and Strong > Unfavorable in section 3 means the ranking carries real information; otherwise the Quick Picks labels are noise and the sizing on that page shouldn't be trusted with real money.
+
+## STEP 11b -- Point-in-time 13F universe for the backtest
+
+**Why.** The first real STEP 11 run (87 tickers, 2017-2026) looked wrong in a specific way: *every* score bucket beat SPY by ~5% per quarter, the labels were inverted (Unfavorable +12.6% vs Strong +4.9% forward excess), and low volatility had a rank-IC t-stat of -3.3. That is the signature of a biased universe, not of a signal: the backtest applied **today's** 13F holdings to every past date. Today's holdings are, by construction, companies that survived and grew into large positions -- so in 2017 the "universe" already knew who would win, and the most volatile (riskiest-looking) names in it were the ones that later went up the most. No model can be judged on that universe, so this is fixed before any ML.
+
+**What changed.**
+
+```text
+SEC submissions JSON (filings.recent + every filings.files[] page back to the start year)
+    -> every 13F-HR since --history-start-year (default 2016), one per quarter
+    -> same per-accession parquet cache, compare_quarters, select_positions, direction mapping as STEP 7
+    -> CUSIP -> ticker (security_master, OpenFIGI, cached; paced for the free 25 req/min tier)
+    -> data/processed/backtest/universe_history.parquet
+       one row per (filing_date, filer, CUSIP): report_period, ticker (None if unresolved),
+       status, view_direction, confidence, value, weight
+```
+
+- `holdings_13f.build_universe_history()` / `build_filer_history()`. The live path (`refresh_13f_mentions`, latest two quarters, `institutional_mentions.parquet`) is unchanged and never written by history mode.
+- **Availability date = SEC filing date**, never the quarter end. A Q1 13F (quarter end 31 March) filed on 15 May enters the universe on 15 May, not before.
+- `dataset.build_panel(universe="pit", universe_history=...)`: on each rebalance date, a ticker is a member only if it is in the **latest filing of at least one filer with `filing_date <= date`**. Labels enter at the next day's close, so a filing made after that day's close is still tradable. A filer's latest filing stops counting after 200 days (`PIT_MAX_FILING_AGE_DAYS`), so a filer that stops filing doesn't freeze its last holdings into the universe.
+- **Point-in-time `institutional_direction_score`** per (date, ticker), with the same aggregation as `universe.py` (`aggregate_direction` over the filers' rows), and **`score_rank = score_full + 0.10 x institutional_direction_score`**: the app's full `rank_score`, now testable. In `pit` mode the Strong/Favorable/... labels (report section 3) are cut from `score_rank`, as in the app.
+- **Coverage is counted, not dropped**: members whose CUSIP didn't resolve, or whose ticker yfinance can't price (delisted, renamed), stay in `universe_membership.parquet`. The report gives per year the share with a ticker, the share priced, and the number of tickers never priced (`universe_coverage.csv`).
+
+**Run it.**
+
+```bash
+python src/run_backtest.py --build-universe-history                       # all filers in 13f_filers.csv, 2016+
+python src/run_backtest.py --build-universe-history --history-start-year 2019 \
+    --filers Berkshire=1067983 "State Street" JPMorgan Fidelity --start 2019-03-01
+python src/run_backtest.py                      # pit is the default once universe_history.parquet exists
+python src/run_backtest.py --universe current   # the old, survivorship-biased universe, for comparison
+```
+
+The first history build is slow: a few thousand SEC requests (<= ~7 req/s), plus OpenFIGI for every new CUSIP at 25 requests/min without `OPENFIGI_API_KEY`. After that, filings and CUSIP resolutions are cached, and prices go to `data/raw/prices_long/` as in STEP 11.
+
+**New in the report**: section 0 (universe size and price coverage by year), `score_rank` next to the other signals, and section 5: the mean forward excess return of the *whole* universe per year. On an unbiased universe this should be close to 0. If it is more than 1.5% per label period, the report says so explicitly. An equal-weighted universe can still legitimately trail a cap-weighted SPY for a while (e.g. mega-cap-led years).
+
+**Remaining limits.**
+- **Delisted names can't be priced by yfinance**: they are in the universe but outside every metric. Coverage (section 0) shows how big that hole is, and it is largest in the earliest years. Some survivorship bias remains until a price source with delisted history is added.
+- **13F = long US equity positions only**: no shorts, options, non-US holdings or intra-quarter trades; amendments (13F-HR/A) are ignored.
+- CUSIP -> ticker uses today's OpenFIGI mapping: a CUSIP retired after a merger may not resolve (counted as "no ticker"), and a ticker later reused by another company would price the wrong stock.
+- Filer CIKs change (BlackRock files under CIK 2012383 only since 2024; its earlier 13Fs are under 1364742), so a default filer list can have a shorter history than the start year suggests. Check the per-filer `first_filed` printed by `--build-universe-history`.

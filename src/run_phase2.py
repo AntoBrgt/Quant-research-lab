@@ -78,6 +78,11 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    import prepare_phase2_data
+    if not all(ok for _, _, ok in prepare_phase2_data.status()):
+        _log(prepare_phase2_data.missing_message())
+        return 1
+
     commit = git("rev-parse", "--short", "HEAD") or "unknown"
     dirty = git("status", "--porcelain", "--", *FROZEN_FILES)
     lock = None

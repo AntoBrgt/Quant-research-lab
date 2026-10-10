@@ -50,6 +50,7 @@ REGISTRY_PATH = data.BACKTEST_DIR / "registry.parquet"
 RETURNS_DIR = data.BACKTEST_DIR / "registry_returns"
 PROMOTIONS_PATH = data.BACKTEST_DIR / "promotions.parquet"
 HOLDOUT_LOG_PATH = data.BACKTEST_DIR / "holdout_log.parquet"
+ADDENDUM_LOG_PATH = data.BACKTEST_DIR / "addendum_holdout_log.parquet"
 PROMOTION_MIN_DSR = 0.95
 PROMOTION_MAX_PBO = 0.20
 CSCV_BLOCKS = 16
@@ -303,4 +304,33 @@ def final_test(strategy_id: str, runner: Callable[[], dict]) -> dict:
              "finished": datetime.now(timezone.utc).isoformat(timespec="seconds"),
              "summary": json.dumps(result.get("summary", {}), default=str)}
     pd.concat([log, pd.DataFrame([entry])], ignore_index=True).to_parquet(HOLDOUT_LOG_PATH, index=False)
+    return result
+
+
+def addendum_holdout(test_id: str, runner: Callable[[], dict], force: bool = False) -> dict:
+    """The 2026-10-10 addendum's one holdout look (README, PHASE 1b addendum).
+
+    The 11 registered variants were never promoted, so `final_test` cannot run them.
+    The addendum fixed a verdict rule for all 11 at once BEFORE the holdout was
+    opened; this runs it once. A second call is refused, and every call is logged
+    BEFORE it runs, so a crashed run still counts as a look. `force` re-runs anyway
+    (e.g. after a crash); the log and the report then say so.
+    """
+    log = pd.read_parquet(ADDENDUM_LOG_PATH) if ADDENDUM_LOG_PATH.exists() else pd.DataFrame(columns=["test_id"])
+    previous = int((log["test_id"] == test_id).sum())
+    if previous and not force:
+        raise HoldoutViolation(f"{test_id} already had its one holdout look")
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    entry = {"test_id": test_id, "started": started, "finished": None, "summary": None, "run": previous + 1,
+             "forced": bool(previous)}
+    ADDENDUM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pd.concat([log, pd.DataFrame([entry])], ignore_index=True).to_parquet(ADDENDUM_LOG_PATH, index=False)  # logged before it runs
+    with _holdout_access():
+        result = runner()
+    log = pd.read_parquet(ADDENDUM_LOG_PATH)
+    row = log.index[log["test_id"] == test_id][-1]
+    log.loc[row, "finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    log.loc[row, "summary"] = json.dumps(result.get("summary", {}), default=str)
+    log.to_parquet(ADDENDUM_LOG_PATH, index=False)
+    result["looks"] = previous + 1
     return result

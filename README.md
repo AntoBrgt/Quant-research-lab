@@ -737,3 +737,21 @@ The first `run_phase1b.py` run built the dev panel (48,188 stock-months, 2013-08
   - adding SUE and text moved IC by less than its noise.
 - **No promotion decision has been made, and the holdout has not been touched** (`promotions.parquet` and `holdout_log.parquet` don't exist yet).
 - Finishing the run should register only the 13 missing variants. Re-running identical variants would double-count trials in the deflated Sharpe ratio.
+
+### PHASE 1b addendum (2026-10-10) -- closing PHASE 1b: one holdout look for the 11 registered variants
+**Written and committed before the PHASE 1b holdout was opened.** The first run registered 11 of the 24 planned variants and stopped, and none was promoted. The remaining 13 (the +industry and +changes feature sets, and the single-signal references) are **not** run: running them now, after this addendum, would be more development, not a test. PHASE 1b closes with this one look.
+
+- **Variants judged**: exactly the 11 in `registry.parquet`, with no change of model, features or parameters: {LightGBM regression, ridge, lambdarank, reg+rank ensemble} on base and base+sue, and {LightGBM regression, ridge, lambdarank} on base+sue+text (`phase1b_addendum.VARIANTS`).
+- **How**: the panel is rebuilt through the data end, with the same code, the holdout open, the TF-IDF still fit on pre-2014 filings, and the same MiniLM model. Each variant's walk-forward (36 training months, test blocks of 6, embargo 1) runs over the full period, so holdout months are predicted by models trained only on earlier months. Only signal months >= 2024-01-01 are judged. Gate: `protocol.addendum_holdout`, logged *before* it runs, so a crash still counts as a look; a second run is refused without `--force`, and a forced run is flagged in the report.
+- **A variant PASSES** only if, on the holdout months, all three hold:
+  1. its per-date rank IC NW t (1 lag) is > 2 after a **Holm** correction over the 11: the two-sided p-value, Holm-adjusted, is < 0.0455 (the p of t = 2 for a single test), with t > 0;
+  2. its mean rank IC is > 0;
+  3. its **top-minus-bottom decile** spread after costs (monthly, 0.15%/side on each leg's turnover) has a mean > 0.
+
+  Otherwise it is NO EDGE.
+- **Lazy Prices PASSED** only if at least one of the three base+sue+text variants passes **and** its holdout mean rank IC is higher than the same model's on base+sue. Without the second condition, a pass could come entirely from the non-text features. Otherwise **FAILED**. This result decides STEP 16 in `PREREGISTRATION_PHASE3.md`: if Lazy Prices failed, STEP 16 is dropped; if it passed, STEP 16 is kept only as a confirmation on the small-cap band.
+- **Reported, not part of the verdict**: top-decile long-only return vs SPY over the same months, and each variant's development IC recomputed in this run vs its registered value (a pipeline check).
+
+```bash
+python src/run_phase1b_addendum.py     # -> data/processed/backtest/phase1b/addendum_report.md
+```

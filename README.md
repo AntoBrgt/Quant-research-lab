@@ -750,7 +750,7 @@ No rule passes in development. Under the "both periods" rule, every hypothesis i
 
 The H3 "closed only" line is biased upward by construction. A recent H3 trade can only have closed early by hitting its +30% target, so dropping open trades keeps recent winners and removes recent trades still in progress. H1 and H2 are unchanged in direction.
 
-**PHASE 2 VERDICT: all three rules NOT PROVEN.** Per the pre-registration, the Quick Picks page shows no BUY/SELL orders: it is a watchlist with no validated strategy. No variant of H1-H3 is added. (The STEP 23-style app change follows the pre-registration's "No pass" clause and is a separate, later change.)
+**PHASE 2 VERDICT: all three rules NOT PROVEN.** No variant of H1-H3 is added. Per the pre-registration's "No pass" clause, the Quick Picks page must stop showing BUY/SELL orders and become a watchlist labelled "no validated strategy". **Not done yet:** `pages/0_Quick_Picks.py` still shows BUY/SELL lines (with the Phase 1 warning).
 
 | Phase | Strategy | Test | Annualized after costs (holdout) | Benchmark, same exposure | Verdict |
 |---|---|---|---|---|---|

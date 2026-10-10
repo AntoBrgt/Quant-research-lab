@@ -693,3 +693,47 @@ Every strategy tested from STEP 11b to STEP 15, on point-in-time, survivorship-a
 | 14a | Small-cap LightGBM, top decile | OOS rank IC -0.001, t -0.05 | +6.4% as priced; -66% in the -50% survivorship case | IWM +9.5%, SPY +15.2% | DOES NOT BEAT MARKET |
 
 **Conclusion.** Tested with point-in-time data, embargoed walk-forward validation, costs, random baselines and pre-registered verdict rules, none of the ranking, trading-loop, value/survival or small-cap strategies beat simply holding SPY. Several beat most random pickers (the STEP 15 screen and the app's short-term picks), but not the market. **Per the pre-registration, no further strategy variants are added.** The app stays a research and watchlist tool, and the Quick Picks warning stays.
+
+## PHASE 1b -- Iterate properly, without fooling ourselves
+
+PHASE 1 tested a dozen strategies one at a time, each with its own pre-registered verdict. That guards each test, but not the *search*: try enough variants on the same history and one will look good by luck. PHASE 1b therefore allows free iteration on a development period, but counts every attempt. Only a candidate that survives explicit selection-bias tests gets one look at data nobody has touched.
+
+### Protocol (`src/backtest/protocol.py`)
+- **Holdout: 2024-01-01 -> today.** Every development loader (`load_prices`, `xbrl_table`, `filing_sections`, `monthly_members`) stops at 2023-12-31, or raises `HoldoutViolation` if asked for a later date.
+  - Labels are computed from dev prices only, so a next-month window that would end in January 2024 has no label at all. `assert_labels_dev` also checks that every label window ends before the holdout.
+  - Only `protocol.final_test(strategy_id, runner)` opens the holdout: once per promoted strategy, logged in `holdout_log.parquet`. A second call is refused.
+- **Registry** (`data/processed/backtest/registry.parquet`, append-only). Every run of every variant is logged with its id, description, parameters, dev rank IC, t-stat, Sharpe, annualized return, timestamp, and its full monthly dev return series (`registry_returns/`). Re-running the same parameters adds a new row: runs are counted, not deduplicated.
+- **Selection-bias statistics over ALL registered variants**:
+  - **Deflated Sharpe ratio** (Bailey & López de Prado, 2014): the probability that the candidate's Sharpe beats the expected maximum Sharpe of N unskilled trials (N = registry size, their Sharpe variance), corrected for skew, fat tails and sample length.
+  - **Probability of backtest overfitting** (CSCV, Bailey, Borwein, López de Prado & Zhu, 2017): the dev months are split into 16 blocks. For each of the 12,870 half/half splits, the in-sample best variant is ranked out of sample. PBO is the share of splits where it lands in the bottom half.
+- **Promotion rule** (fixed before running): the candidate is the variant with the best dev Sharpe among this run's models. It reaches the holdout only if **DSR > 0.95 and PBO < 0.2**. The holdout result is reported whatever it is.
+
+### New information (development period only)
+- **Lazy Prices** (Cohen, Malloy & Nguyen, 2020), in `src/edgar_sections.py` and `src/backtest/lazy_prices.py`.
+  - Risk Factors and MD&A are extracted from every 10-K and 10-Q since 2012 for the top-500 point-in-time universe (~744 issuers). Each 10-K is compared with the previous year's 10-K, and each 10-Q with the same quarter a year earlier.
+  - Features: TF-IDF cosine similarity, sentence-embedding cosine similarity (all-MiniLM-L6-v2 on 8 evenly spaced ~1,000-character chunks, **10-K only**: on CPU, embedding every 10-Q too would take 7+ hours), change in similarity, and log length change, per section.
+  - Point-in-time rules: TF-IDF vocabulary and IDF are fit on pre-2014 filings only; the embedding model is fixed and pretrained; a filing's features exist from its SEC filing date and expire after 200 days.
+  - Extraction reuses the project's HTML-to-text and table-of-contents heuristics. It handles split "Item 1A." / "Risk Factors" headings and running page headers, and treats stubs (< 1,500 characters) or runaway sections (> 400,000 characters, e.g. combined annual reports) as missing.
+- **Kept features**: XBRL SUE (from the filing date) and days since the last filing, insider (Form 4), 13F, momentum, quality.
+- **New transforms**: an **industry-relative** version of each feature (minus its SIC 2-digit median that month, if >= 3 names), and **1- and 3-month changes** (same ticker, exact calendar months).
+
+### Models and portfolio (`src/backtest/phase1b.py`, `src/run_phase1b.py`)
+- **Feature sets**: base -> +SUE -> +text -> +industry-relative -> +changes.
+- **Models**: LightGBM regressor, **LightGBM lambdarank** (one query group per month, relevance = decile of next-month return), ridge, and a regressor+ranker rank-average ensemble. Single-signal references: momentum, SUE, text similarity.
+- **Walk-forward**: 36 training months, test blocks of 6, embargo 1. Target: rank of the next month's return (next open to next open).
+- **Portfolio**: top decile, monthly, equal weight, **0.15%/side** on turnover. A **volatility-targeted** version (15% annual volatility from the previous 12 months only, capped at 1.5x, cash at the T-bill rate) allows comparison with SPY at similar risk.
+
+```bash
+python src/run_phase1b.py                  # dev panel, all variants -> registry, DSR/PBO, promotion (+ holdout only if promoted)
+python src/run_phase1b.py --no-embeddings  # TF-IDF similarity only
+```
+
+### Status: first run interrupted (no verdict yet)
+The first `run_phase1b.py` run built the dev panel (48,188 stock-months, 2013-08 -> 2023-12). Text came from 37,740 filings of 706 issuers, 26,497 of them filed in the dev period, with 12,682 10-K section embeddings.
+- It registered **11 of 24 planned variants** before the session ended. Those 11 stay in the registry and count as trials.
+- **Dev results so far are weak**:
+  - best rank IC 0.017 (t 1.23, LightGBM on base+SUE+text);
+  - portfolio Sharpe 0.20-0.58 (8-10%/yr) over 88 dev months;
+  - adding SUE and text moved IC by less than its noise.
+- **No promotion decision has been made, and the holdout has not been touched** (`promotions.parquet` and `holdout_log.parquet` don't exist yet).
+- Finishing the run should register only the 13 missing variants. Re-running identical variants would double-count trials in the deflated Sharpe ratio.

@@ -755,3 +755,33 @@ The first `run_phase1b.py` run built the dev panel (48,188 stock-months, 2013-08
 ```bash
 python src/run_phase1b_addendum.py     # -> data/processed/backtest/phase1b/addendum_report.md
 ```
+
+### PHASE 1b addendum -- result (holdout opened once: 2026-10-10 18:51 UTC, commit `cb5e8eb`)
+Holdout signal months 2024-01 -> 2026-07 (31 months with a next-month label), top-500 point-in-time universe.
+
+| Variant | Mean rank IC | NW t | Holm p | Decile spread / month, net | Top decile / yr | SPY / yr | Checks | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| lgbm_reg / base | -0.0012 | -0.07 | 1.000 | -0.09% | +20.3% | +21.0% | 0/3 | NO EDGE |
+| ridge / base | -0.0348 | -1.61 | 1.000 | -1.66% | +5.8% | +21.0% | 0/3 | NO EDGE |
+| lgbm_rank / base | -0.0030 | -0.13 | 1.000 | +0.53% | +28.7% | +21.0% | 1/3 | NO EDGE |
+| ensemble / base | -0.0050 | -0.24 | 1.000 | +0.22% | +24.8% | +21.0% | 1/3 | NO EDGE |
+| lgbm_reg / base+sue | -0.0044 | -0.21 | 1.000 | -0.35% | +23.7% | +21.0% | 0/3 | NO EDGE |
+| ridge / base+sue | -0.0344 | -1.53 | 1.000 | -1.53% | +6.5% | +21.0% | 0/3 | NO EDGE |
+| lgbm_rank / base+sue | +0.0251 | 0.93 | 1.000 | +1.05% | +31.5% | +21.0% | 2/3 | NO EDGE |
+| ensemble / base+sue | +0.0145 | 0.66 | 1.000 | +0.91% | +32.2% | +21.0% | 2/3 | NO EDGE |
+| lgbm_reg / base+sue+text | +0.0046 | 0.23 | 1.000 | +0.03% | +24.7% | +21.0% | 2/3 | NO EDGE |
+| ridge / base+sue+text | -0.0307 | -1.39 | 1.000 | -1.73% | +4.7% | +21.0% | 0/3 | NO EDGE |
+| lgbm_rank / base+sue+text | +0.0194 | 0.70 | 1.000 | +1.34% | +37.2% | +21.0% | 2/3 | NO EDGE |
+
+**Lazy Prices: FAILED.** No base+sue+text variant passes. Text raised the holdout IC for LightGBM regression (+0.0046 vs -0.0044) and ridge (-0.0307 vs -0.0344), and lowered it for lambdarank (+0.0194 vs +0.0251). None of these changes is distinguishable from noise.
+
+- No variant comes close to the bar: the best NW t is 0.93, against > 2 *before* any correction. The Holm step did not decide anything.
+- Several top deciles beat SPY over these 31 months (lambdarank with text: +37.2%/yr vs +21.0%). This is not part of the verdict, and their rank ICs are indistinguishable from 0. A top decile of the top-500 in a strong large-cap market can beat SPY without any ordering skill, much like random pickers.
+- **Pipeline check.** On the development panel, the addendum code reproduces every registered dev IC exactly. On the full panel, the recomputed dev ICs differ slightly (e.g. +0.0157 vs +0.0167). The full panel adds December 2023's label (it was unlabelled in dev because its window crossed the holdout), and the walk-forward blocks fall differently over a longer date range. The differences are small, and the sign never flips for a variant with |IC| > 0.005.
+
+**PHASE 1b is closed.** None of the 11 registered variants has an edge on the holdout, and the 13 unrun variants stay unrun.
+
+| Phase | Strategy | Test | Annualized after costs (holdout) | SPY, same months | Verdict |
+|---|---|---|---|---|---|
+| 1b | 11 registered LightGBM / ridge / lambdarank / ensemble variants, top 500 | best holdout rank IC t 0.93 (Holm over 11) | top decile +4.7% to +37.2%; spread -19.8% to +14.8% | +21.0% | NO EDGE (all 11) |
+| 1b | Lazy Prices text features (top 500) | text variants: none passes; adds IC in 2 of 3 models, by noise-level amounts | -- | -- | FAILED |

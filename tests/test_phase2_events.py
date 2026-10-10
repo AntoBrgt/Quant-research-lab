@@ -178,6 +178,22 @@ def test_h2_threshold_uses_only_earlier_filings():
     assert "BIG" in set(with_future["ticker"])
 
 
+def test_h2_one_event_per_filing_using_its_latest_period():
+    days = pd.bdate_range("2019-01-01", periods=200)
+    sue = {f"T{i}": pd.DataFrame({"end": [days[i] - pd.Timedelta(days=40)], "filed": [days[i]], "sue": [0.0]})
+           for i in range(150)}
+    late = days[180]
+    # one 10-Q filed on `late` first tags two stale quarters (huge SUE) and its own quarter (negative SUE)
+    sue["OLD"] = pd.DataFrame({"end": pd.to_datetime(["2017-03-31", "2017-06-30", "2019-06-30"]),
+                               "filed": [late] * 3, "sue": [9.0, 8.0, -1.0]})
+    sue["NEW"] = pd.DataFrame({"end": pd.to_datetime(["2017-03-31", "2019-06-30"]),
+                               "filed": [late] * 2, "sue": [0.0, 9.0]})
+    events = sig.earnings_surprise_events(sue, lambda d, t: True, min_history=50)
+    on_late = events[events["signal_date"] == late]
+    assert list(on_late["ticker"]) == ["NEW"]
+    assert not events.duplicated(["ticker", "signal_date"]).any()
+
+
 def test_h2_needs_enough_history():
     days = pd.bdate_range("2019-01-01", periods=20)
     sue = {f"T{i}": pd.DataFrame({"filed": [days[i]], "sue": [float(i)]}) for i in range(20)}

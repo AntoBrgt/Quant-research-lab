@@ -68,12 +68,18 @@ def earnings_surprise_events(sue_by_ticker: dict[str, pd.DataFrame], is_member,
 
     `sue_by_ticker[t]` is `sec_xbrl.sue_series` output (filed, sue); `is_member(date, ticker)`
     is the point-in-time universe test. The threshold uses only filings strictly before D.
+
+    One value per filing: the SUE of the latest period end filed that day. `sue_series` dates
+    each quarter by its first tagged filing, so one 10-K can also carry older quarters tagged
+    for the first time; those are stale news, not that filing's surprise (fixed before the holdout).
     """
     frames = []
     for ticker, sue in sue_by_ticker.items():
         if sue is None or sue.empty:
             continue
-        f = sue[["filed", "sue"]].dropna().copy()
+        f = sue[["filed", "sue"] + (["end"] if "end" in sue else [])].dropna().copy()
+        if "end" in f:
+            f = f.sort_values("end").drop_duplicates(subset="filed", keep="last").drop(columns="end")
         f["ticker"] = ticker
         frames.append(f)
     if not frames:

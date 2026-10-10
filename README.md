@@ -724,3 +724,36 @@ The registration defines H2 per filing ("a 10-Q/10-K filing whose SUE ..."). The
 - H3 has few trades: STEP 15 candidates are >= 25% below their 52-week high, so few are above their 200-day average (180 of 4,197 candidate-months).
 
 No rule passes in development. Under the "both periods" rule, every hypothesis is therefore NOT PROVEN before the holdout is opened. The holdout is still run once as registered, and reported below.
+
+### Holdout (run once: 2026-10-10 12:27 UTC, commit `2aea837`, `holdout.lock`)
+
+| Hypothesis | Period | Trades | Mean excess / trade | NW t | 95% CI | Random pct | Portfolio CAGR | Bench, same exposure | Checks | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| H1 Insider cluster buying | development | 1,104 | +0.70% | -0.09 | [-0.60%, +1.98%] | 74 | +1.21% | +6.31% (IWM) | 1/5 | |
+| | holdout | 281 | +0.80% | 1.25 | [-2.15%, +4.11%] | 78 | +11.03% | +12.93% (IWM) | 1/5 | **NOT PROVEN** |
+| H2 Top-decile SUE drift | development | 2,033 | +0.80% | 2.50 | [-0.33%, +2.12%] | 68 | +9.18% | +6.93% (IWM) | 3/5 | |
+| | holdout | 699 | -1.86% | -2.22 | [-3.95%, +0.12%] | 8 | +3.65% | +14.73% (IWM) | 0/5 | **NOT PROVEN** |
+| H3 Cheap quality + 200-day trend | development | 122 | -3.55% | -0.67 | [-7.31%, +0.66%] | 93 | +2.74% | +3.13% (SPY) | 0/5 | |
+| | holdout | 44 | +6.34% | 0.32 | [-2.34%, +12.71%] | 100 | +17.26% | +6.93% (SPY) | 3/5 | **NOT PROVEN** |
+
+- **H2 reversed.** Its development t of 2.5 became -2.2 in the holdout: worse than 92% of random pickers, and +3.7%/yr vs IWM +14.7%. The development edge did not survive fresh data.
+- **H1** is positive in both periods, but never close to significant (t 1.25), and trails IWM at the same exposure in both.
+- **H3** looks good in the holdout, but on only 44 trades, with t 0.32 and a CI that includes 0. It failed every check in development. The rule requires both periods, and two good years on 44 trades are what luck produces, so this is not a lead to rescue.
+
+**Check (not part of the verdict): trades still open at the data end** (`python src/phase2_checks.py`). The registered rule counts a trade still open on 2026-09-25 at its return so far. Dropping those trades removes the most recent entries, so this is a different sample, not a corrected one.
+
+| Hypothesis | Holdout trades | Open at data end | Mean excess (all) | Mean excess (closed only) | NW t (closed only) | 95% CI (closed only) |
+|---|---|---|---|---|---|---|
+| H1 | 281 | 28 | +0.80% | +0.91% | 0.63 | [-2.46%, +4.54%] |
+| H2 | 699 | 92 | -1.86% | -2.43% | -2.79 | [-4.69%, -0.45%] |
+| H3 | 44 | 15 | +6.34% | +14.95% | 1.20 | [+1.59%, +24.53%] |
+
+The H3 "closed only" line is biased upward by construction. A recent H3 trade can only have closed early by hitting its +30% target, so dropping open trades keeps recent winners and removes recent trades still in progress. H1 and H2 are unchanged in direction.
+
+**PHASE 2 VERDICT: all three rules NOT PROVEN.** Per the pre-registration, the Quick Picks page shows no BUY/SELL orders: it is a watchlist with no validated strategy. No variant of H1-H3 is added. (The STEP 23-style app change follows the pre-registration's "No pass" clause and is a separate, later change.)
+
+| Phase | Strategy | Test | Annualized after costs (holdout) | Benchmark, same exposure | Verdict |
+|---|---|---|---|---|---|
+| 2 | H1 insider cluster buying (small caps) | holdout t 1.25, random pct 78 | +11.0% (2024-09 -> 2026-09) | IWM +12.9% | NOT PROVEN |
+| 2 | H2 top-decile SUE drift (small caps) | holdout t -2.22, random pct 8 | +3.7% | IWM +14.7% | NOT PROVEN |
+| 2 | H3 cheap quality + 200-day trend (top 500) | holdout t 0.32 (44 trades); development 0/5 | +17.3% | SPY +6.9% at 38% exposure | NOT PROVEN |

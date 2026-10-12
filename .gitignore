@@ -5,7 +5,8 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
-data/.pytest_cache/
+data/
+.pytest_cache/
 .mypy_cache/
 .ruff_cache/
 *.parquet

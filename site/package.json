@@ -1,0 +1,30 @@
+{
+  "name": "quant-research-lab-site",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Static showcase of the Quant-research-lab results (reads site/public/data only).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build && node scripts/flatten-segments.mjs",
+    "start": "npx serve out",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=20.9.0" },
+  "dependencies": {
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-is": "19.3.0",
+    "react-markdown": "10.1.0",
+    "recharts": "3.10.1",
+    "remark-gfm": "4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3"
+  }
+}

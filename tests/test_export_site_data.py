@@ -47,7 +47,8 @@ def test_no_ticker_level_recommendations():
             continue  # the Phase 3 ledger records past picks by design; checked separately below
         for where, key, value in _walk(json.loads(path.read_text(encoding="utf-8"))):
             assert key.lower() not in forbidden_keys, f"{path.name}{where}"
-            if isinstance(value, str):
+            verbatim_document = path.name == "preregistrations.json" and key in {"markdown", "title"}  # frozen text, quoted as is
+            if isinstance(value, str) and not verbatim_document:
                 assert not re.search(r"\b(BUY|SELL)\b", value), f"{path.name}{where}: {value}"
     ledger = _load("ledger.json")
     assert ledger["status"] in {"not_started", "running", "closed"}

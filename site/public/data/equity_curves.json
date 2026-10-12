@@ -1,5 +1,5 @@
 {
- "code_commit": "cffd83c",
+ "code_commit": "aba35ec",
  "curves": {
   "phase2-H1-development": {
    "benchmark": "IWM buy and hold",
@@ -3546,6 +3546,6 @@
    "title": "STEP 15 cheap quality + XGBoost survival (+30% target), primary portfolio"
   }
  },
- "generated_at": "2026-10-12T18:56:57+02:00",
+ "generated_at": "2026-10-12T19:05:14+02:00",
  "schema_version": 1
 }

@@ -131,9 +131,11 @@ def verdict_rows(log_text: str) -> list[dict]:
                      "annualized_after_costs": r["Annualized after costs"], "benchmark_same_period": r["SPY / IWM, same period"],
                      "verdict": r["Verdict"]})
     for r in md_tables_after(log_text, r"PHASE 1b addendum -- result")[-1]:
+        bench = r["SPY, same months"]  # the benchmark's name is in the log's column header
         rows.append({"phase": "1b", "step": "1b", "name": r["Strategy"], "test": r["Test"],
                      "annualized_after_costs": r["Annualized after costs (holdout)"],
-                     "benchmark_same_period": r["SPY, same months"], "verdict": r["Verdict"]})
+                     "benchmark_same_period": bench if bench.startswith("--") or "SPY" in bench else f"SPY {bench}",
+                     "verdict": r["Verdict"]})
     for r in md_tables_after(log_text, r"^### Holdout \(run once")[-1]:
         rows.append({"phase": "2", "step": "2", "name": r["Strategy"], "test": r["Test"],
                      "annualized_after_costs": r["Annualized after costs (holdout)"],
@@ -310,6 +312,55 @@ def phase1b_table() -> dict:
 
 
 # ----------------------------------------------------------------------------
+# Pre-registrations: each document with the commit that froze it
+# ----------------------------------------------------------------------------
+
+REPO_URL = "https://github.com/AntoBrgt/Quant-research-lab"
+
+
+def _commit(fmt_args: list[str]) -> Optional[dict]:
+    out = git("log", "--format=%H %cI", *fmt_args).splitlines()
+    if "--diff-filter=A" in fmt_args:
+        out = out[-1:]  # the oldest add (a file deleted and re-added keeps its first freeze)
+    if not out:
+        return None
+    full, date = out[0].split()
+    return {"hash": full[:7], "full_hash": full, "date": date, "url": f"{REPO_URL}/commit/{full}"}
+
+
+def section_text(text: str, heading: str) -> str:
+    """The body of the section whose heading line starts with `heading` (until the next heading of the same or higher level)."""
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith(heading))
+    level = len(heading) - len(heading.lstrip("#"))
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("#") and len(lines[i]) - len(lines[i].lstrip("#")) <= level), len(lines))
+    return "\n".join(lines[start:end]).strip() + "\n"
+
+
+def preregistrations(log_text: str) -> list[dict]:
+    docs = []
+    for path in sorted(ROOT.glob("PREREGISTRATION_*.md")):
+        if not git("ls-files", path.name):
+            continue  # a draft that is not committed is not a pre-registration
+        first = _commit(["--diff-filter=A", "--", path.name])
+        last = _commit(["-1", "--", path.name])
+        docs.append({"id": path.stem.lower(), "title": path.read_text(encoding="utf-8").splitlines()[0].lstrip("# ").strip(),
+                     "source": path.name, "frozen_commit": first, "last_commit": last,
+                     "unchanged_since_freeze": bool(first and last and first["full_hash"] == last["full_hash"]),
+                     "markdown": path.read_text(encoding="utf-8")})
+    protocol = section_text(log_text, "### Protocol (`src/backtest/protocol.py`)")
+    addendum = section_text(log_text, "### PHASE 1b addendum (2026-10-10)")
+    docs.append({"id": "phase1b_protocol_and_addendum", "title": "PHASE 1b protocol and 2026-10-10 addendum",
+                 "source": "docs/RESEARCH_LOG.md (PHASE 1b)",
+                 "frozen_commit": _commit(["--reverse", "-S", "PHASE 1b addendum (2026-10-10)", "--", "README.md"]),
+                 "protocol_commit": _commit(["--reverse", "-S", "PHASE 1b -- Iterate properly", "--", "README.md"]),
+                 "last_commit": None, "unchanged_since_freeze": None,
+                 "markdown": "## PHASE 1b protocol\n\n" + protocol.split("\n", 1)[1] + "\n" + addendum})
+    return docs
+
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 
@@ -328,6 +379,7 @@ def build() -> dict[str, dict]:
         "random_baselines.json": {**m, "rows": random_baselines(p2)},
         "phase2_holdout.json": {**m, **p2},
         "phase1b_holdout.json": {**m, **phase1b_table()},
+        "preregistrations.json": {**m, "documents": preregistrations(log_text)},
         "ledger.json": {**m, "status": "not_started", "forward_test_start": None, "arms": [], "picks": []},
     }
     return files

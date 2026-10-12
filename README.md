@@ -12,7 +12,7 @@
 
 **None beat SPY or IWM after costs.** Several beat most *random* stock pickers, and a few had good stretches, but none cleared a pre-registered bar on data it had never seen. The repository is built to make that answer trustworthy: every rule was fixed in a commit before its test ran, and every holdout was opened once.
 
-**Live site: <https://site-five-theta-zykgysbvsl.vercel.app/>** ([how it's deployed](docs/DEPLOY.md)) · Full step-by-step log: [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md) · Pre-registrations: [Phase 2](PREREGISTRATION_PHASE2.md)
+**Live site: <https://site-five-theta-zykgysbvsl.vercel.app/>** ([how it's deployed](docs/DEPLOY.md)) · Full step-by-step log: [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md) · Pre-registrations: [Phase 2](PREREGISTRATION_PHASE2.md), [Phase 3](PREREGISTRATION_PHASE3.md)
 
 ## Verdicts
 
@@ -28,9 +28,18 @@
 | 2 | H1 insider cluster buying (small caps), holdout | t 1.25, random pct 78 | +11.0% (2024-09 -> 2026-09) | IWM +12.9% | NOT PROVEN |
 | 2 | H2 top-decile earnings surprise (small caps), holdout | t -2.22, random pct 8 | +3.7% | IWM +14.7% | NOT PROVEN |
 | 2 | H3 cheap quality + 200-day trend (top 500), holdout | t 0.32 on 44 trades; failed all checks in development | +17.3% | SPY +6.9% at 38% exposure | NOT PROVEN |
-| 3 | Own text models + LLM agent + forward-tested pick ledger | pre-registration drafted; forward test not started | -- | -- | -- |
+| 3 | Own text models + LLM agent + forward-tested pick ledger | pre-registration committed; forward test not started | -- | -- | -- |
 
 Details and every intermediate result: [PHASE 1 VERDICT](docs/RESEARCH_LOG.md#phase-1-verdict) · [PHASE 1b addendum result](docs/RESEARCH_LOG.md#phase-1b-addendum----result-holdout-opened-once-2026-10-10-1851-utc-commit-cb5e8eb) · [PHASE 2](docs/RESEARCH_LOG.md#phase-2----three-pre-registered-event-rules-python-srcrun_phase2py).
+
+## Phase 3 (in progress)
+
+**Pre-registration frozen in commit [`da95daa`](https://github.com/AntoBrgt/Quant-research-lab/commit/da95daad374504149e7bbecfc95ce9e4b703b896) (pushed 2026-10-12), before any Phase 3 code touched data.** Rules: [PREREGISTRATION_PHASE3.md](PREREGISTRATION_PHASE3.md). Work happens on branch `phase3`.
+
+- **The question:** can our own text models on 8-Ks and filings, a rules-only event funnel, and an LLM research agent pick small/mid caps that beat IWM?
+- **No untouched history is left** (2013-2026 has been used by Phases 1, 1b and 2). So a backtested PROMOTED only admits a model to the live ledger, and **only the forward test can make an arm TRADEABLE**.
+- **The forward test:** weekly picks from four arms (random, ML ranker, agent, manual) go into an append-only, hash-chained ledger. An arm is TRADEABLE only after >= 26 weeks and >= 60 closed picks, if its 95% CI of excess return vs IWM is > 0, it beats the random arm at the 95th percentile, and it stays positive without its 3 best picks.
+- **STEP 16 (Lazy Prices) is dropped**, because it failed in Phase 1b. FORWARD TEST START is written into the pre-registration in the commit before the first live run.
 
 ## Methodology
 
@@ -75,7 +84,6 @@ The original Streamlit research app is kept as a local tool (`streamlit run app.
 
 ## What I learned
 
-*(draft from the research log -- to be edited)*
 - Most of the work in a backtest is making it honest. Point-in-time universes, filing-date features and next-open entries removed edges that looked real at first.
 - A good-looking AUC can be mechanical. The 0.88 meta-label AUC came from target distance alone, and predicting "hit" was not predicting profit.
 - Beating random pickers is not beating the market. Several strategies beat 74-98% of random pickers and still trailed SPY: the universe, not the selection, drove their returns.

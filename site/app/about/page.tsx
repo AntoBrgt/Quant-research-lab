@@ -4,9 +4,6 @@ import { LOG_URL, REPO_URL } from "@/lib/data";
 
 export const metadata: Metadata = { title: "About" };
 
-// TODO(Antonin): replace the placeholder bio and the LinkedIn URL.
-const LINKEDIN_URL = "";
-
 const STACK = [
   ["Research", "Python 3.12, pandas, NumPy, SciPy, LightGBM, XGBoost, lifelines, scikit-learn, sentence-transformers"],
   ["Data", "SEC EDGAR (13F, Form 4, XBRL, 10-K/10-Q text), OpenFIGI, Yahoo Finance prices, all cached point in time"],
@@ -56,7 +53,7 @@ export default function About() {
             <a href={LOG_URL}>Full research log</a>
           </li>
           <li>
-            {LINKEDIN_URL ? <a href={LINKEDIN_URL}>LinkedIn</a> : <span className="text-muted">LinkedIn (link to be added)</span>}
+            <a href="https://github.com/AntoBrgt">GitHub profile</a>
           </li>
         </ul>
       </Section>

@@ -27,6 +27,11 @@ for (const r of verdicts) {
     if (!results.includes(esc(r[field]))) errors.push(`results: ${r.id} ${field} not shown: ${r[field]}`);
   }
 }
+// "What I learned" on /about/ is the README section verbatim (via about.json)
+const lessons = JSON.parse(readFileSync(new URL("../public/data/about.json", import.meta.url), "utf8")).lessons;
+const about = read("about/index.html").replace(/&#x27;|&#39;|&rsquo;/g, "'").replace(/&quot;/g, '"');
+for (const l of lessons) if (!about.includes(esc(l).replace(/&quot;/g, '"'))) errors.push(`about: lesson not shown: ${l.slice(0, 60)}...`);
+
 if (errors.length) {
   console.error(errors.join("\n"));
   process.exit(1);

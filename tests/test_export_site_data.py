@@ -112,3 +112,10 @@ def test_export_is_deterministic_and_up_to_date(tmp_path):
         fresh = {k: v for k, v in json.loads((tmp_path / "a" / name).read_text(encoding="utf-8")).items() if k not in META_KEYS}
         committed = {k: v for k, v in _load(name).items() if k not in META_KEYS}
         assert fresh == committed, f"{name} is stale: run python src/export_site_data.py"
+
+
+def test_site_lessons_are_the_readme_bullets_verbatim():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    bullets = [l[2:].strip() for l in exp.section_text(readme, "## What I learned").splitlines() if l.startswith("- ")]
+    assert 6 <= len(bullets) <= 8
+    assert _load("about.json")["lessons"] == bullets

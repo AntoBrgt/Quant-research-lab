@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { PageHeader, Section } from "@/components/ui";
-import { LOG_URL, REPO_URL } from "@/lib/data";
+import { lessons } from "@/lib/data";
 
 export const metadata: Metadata = { title: "About" };
 
@@ -14,23 +14,32 @@ const STACK = [
 export default function About() {
   return (
     <div>
-      <PageHeader eyebrow="About" title="Antonin Brengetto">
-        I build and test quantitative research pipelines: getting the data right, and not fooling myself about the
-        results.
-      </PageHeader>
+      <PageHeader eyebrow="About" title="Antonin Brengetto" />
 
-      <Section title="About this project">
-        <div className="max-w-3xl space-y-3 text-muted">
-          <p>
-            Quant Research Lab started as a question: could a machine-learning model, or any systematic rule on public
-            data, beat the index after costs? It became a lesson in how backtests mislead, and in building the safeguards
-            that stop them from doing so.
-          </p>
-          <p>
-            The answer so far is no. That negative result is the product: a reproducible, pre-registered record of what
-            does not work, and why each test can be trusted.
-          </p>
-        </div>
+      <section className="mb-14 max-w-3xl space-y-4 text-lg text-ink">
+        <p>
+          I&rsquo;m a data scientist. I invest some of my own money every month, and I wanted a tool to help me decide
+          what to buy. So I built one, then checked whether its picks would really have beaten the index: only data
+          available at the time, trading costs included, and the rules of each test written down before running it.
+          They didn&rsquo;t, and neither did any model or rule I tried after that.
+        </p>
+        <p>
+          What surprised me most is how hard beating the market is, and that reproducing what institutions do is out of
+          reach for one person working alone. If I started again, I would tackle a different question: is my portfolio
+          safe?
+        </p>
+        <p className="text-base text-muted">
+          Built with Claude Code as a coding assistant; research design, pre-registrations and verdicts reviewed and
+          decided by me.
+        </p>
+      </section>
+
+      <Section title="What I learned">
+        <ul className="max-w-3xl list-disc pl-5 space-y-3 text-muted">
+          {lessons.map((l) => (
+            <li key={l}>{l}</li>
+          ))}
+        </ul>
       </Section>
 
       <Section title="Stack">
@@ -42,20 +51,6 @@ export default function About() {
             </div>
           ))}
         </dl>
-      </Section>
-
-      <Section title="Links">
-        <ul className="space-y-2">
-          <li>
-            <a href={REPO_URL}>Source code on GitHub</a>
-          </li>
-          <li>
-            <a href={LOG_URL}>Full research log</a>
-          </li>
-          <li>
-            <a href="https://github.com/AntoBrgt">GitHub profile</a>
-          </li>
-        </ul>
       </Section>
     </div>
   );

@@ -1,0 +1,14 @@
+{
+ "code_commit": "7e358c4",
+ "generated_at": "2026-10-12T19:50:13+02:00",
+ "lessons": [
+  "My first backtest (STEP 11) used today's institutional holdings for every past date, so it only saw companies that survived, and every score bucket beat SPY. Rebuilding the universe month by month from 13F filings (STEP 11b) taught me to use only what was knowable at the time.",
+  "A model can look excellent and measure nothing. My meta-label filter had an AUC of 0.88, but target distance alone explained it: predicting \"the target gets hit\" was not predicting profit.",
+  "Beating random pickers is not beating the market. Several strategies beat 74-98% of random pickers on the same dates and still trailed SPY.",
+  "A good development result can reverse. H2 (earnings surprise) had a t of 2.5 in development and -2.2 in the holdout.",
+  "A bug fix can change a verdict, so I report it. A stale-quarter bug made H2 fire on old earnings; fixing it moved H2 across the significance bar, and I documented that before opening the holdout.",
+  "Writing the rule down before the test changed how I work: when a test fails, the idea stops there instead of turning into a rescue variant.",
+  "A short holdout proves little. H3 looked good on 44 trades, but with a t of 0.32 that is what luck produces, which is why Phase 3 relies on a forward test."
+ ],
+ "schema_version": 1
+}

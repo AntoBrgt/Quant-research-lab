@@ -84,15 +84,13 @@ The original Streamlit research app is kept as a local tool (`streamlit run app.
 
 ## What I learned
 
-- Most of the work in a backtest is making it honest. Point-in-time universes, filing-date features and next-open entries removed edges that looked real at first.
-- A good-looking AUC can be mechanical. The 0.88 meta-label AUC came from target distance alone, and predicting "hit" was not predicting profit.
-- Beating random pickers is not beating the market. Several strategies beat 74-98% of random pickers and still trailed SPY: the universe, not the selection, drove their returns.
-- Development results reverse. H2's t of 2.5 in development became -2.2 in the holdout.
-- Pre-registration changes behaviour. With the rule fixed in a commit, a failed test ends the idea instead of starting a rescue variant.
-- Count your trials. The Phase 1b registry logs every variant run, so selection bias can be measured (deflated Sharpe, PBO) instead of ignored.
-- A bug found in development must be fixed *and* reported with its effect. The H2 fix moved its t across the bar, which is exactly why it had to be documented before the holdout.
-- Data coverage is a result too. In the small-cap band, many old CUSIPs can't be mapped to a priced ticker (69% of the band in 2013). The survivorship bounds then become so wide (-66%/yr to -100%/yr) that only a strategy already beating the benchmark as priced could be judged.
-- A short holdout is weak evidence either way. 44 trades and 31 months can't confirm or rule out a small edge, so the bar is the forward test.
+- My first backtest (STEP 11) used today's institutional holdings for every past date, so it only saw companies that survived, and every score bucket beat SPY. Rebuilding the universe month by month from 13F filings (STEP 11b) taught me to use only what was knowable at the time.
+- A model can look excellent and measure nothing. My meta-label filter had an AUC of 0.88, but target distance alone explained it: predicting "the target gets hit" was not predicting profit.
+- Beating random pickers is not beating the market. Several strategies beat 74-98% of random pickers on the same dates and still trailed SPY.
+- A good development result can reverse. H2 (earnings surprise) had a t of 2.5 in development and -2.2 in the holdout.
+- A bug fix can change a verdict, so I report it. A stale-quarter bug made H2 fire on old earnings; fixing it moved H2 across the significance bar, and I documented that before opening the holdout.
+- Writing the rule down before the test changed how I work: when a test fails, the idea stops there instead of turning into a rescue variant.
+- A short holdout proves little. H3 looked good on 44 trades, but with a t of 0.32 that is what luck produces, which is why Phase 3 relies on a forward test.
 
 ## License
 

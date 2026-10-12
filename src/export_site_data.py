@@ -361,6 +361,16 @@ def preregistrations(log_text: str) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------
+# "What I learned": the README bullets, verbatim (the site shows the same text)
+# ----------------------------------------------------------------------------
+
+
+def lessons(readme_text: str) -> list[str]:
+    body = section_text(readme_text, "## What I learned")
+    return [l[2:].strip() for l in body.splitlines() if l.startswith("- ")]
+
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 
@@ -380,6 +390,7 @@ def build() -> dict[str, dict]:
         "phase2_holdout.json": {**m, **p2},
         "phase1b_holdout.json": {**m, **phase1b_table()},
         "preregistrations.json": {**m, "documents": preregistrations(log_text)},
+        "about.json": {**m, "lessons": lessons((ROOT / "README.md").read_text(encoding="utf-8"))},
         "ledger.json": {**m, "status": "not_started", "forward_test_start": None, "arms": [], "picks": []},
     }
     return files

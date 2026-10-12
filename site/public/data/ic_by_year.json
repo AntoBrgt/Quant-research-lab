@@ -1,6 +1,6 @@
 {
- "code_commit": "da95daa",
- "generated_at": "2026-10-12T19:48:06+02:00",
+ "code_commit": "7e358c4",
+ "generated_at": "2026-10-12T19:50:13+02:00",
  "schema_version": 1,
  "step14a": {
   "note": "Rank IC = per-date Spearman correlation between the score and the next 63-day excess return vs IWM.",

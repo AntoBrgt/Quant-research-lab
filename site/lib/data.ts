@@ -7,6 +7,7 @@ import phase2Json from "@/public/data/phase2_holdout.json";
 import phase1bJson from "@/public/data/phase1b_holdout.json";
 import preregJson from "@/public/data/preregistrations.json";
 import ledgerJson from "@/public/data/ledger.json";
+import aboutJson from "@/public/data/about.json";
 
 export const REPO_URL = "https://github.com/AntoBrgt/Quant-research-lab";
 export const LOG_URL = `${REPO_URL}/blob/main/docs/RESEARCH_LOG.md`;
@@ -77,6 +78,7 @@ export const phase2 = phase2Json;
 export const phase1b = phase1bJson;
 export const preregistrations = preregJson.documents as Prereg[];
 export const ledger = ledgerJson as unknown as Ledger;
+export const lessons = aboutJson.lessons as string[];
 
 export const testedRows = verdicts.filter((r) => r.phase !== "3");
 export const phase3Row = verdicts.find((r) => r.phase === "3");

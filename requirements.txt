@@ -18,3 +18,5 @@ plotly
 lightgbm
 lifelines
 xgboost
+scikit-learn
+sentence-transformers

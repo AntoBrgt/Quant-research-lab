@@ -694,6 +694,98 @@ Every strategy tested from STEP 11b to STEP 15, on point-in-time, survivorship-a
 
 **Conclusion.** Tested with point-in-time data, embargoed walk-forward validation, costs, random baselines and pre-registered verdict rules, none of the ranking, trading-loop, value/survival or small-cap strategies beat simply holding SPY. Several beat most random pickers (the STEP 15 screen and the app's short-term picks), but not the market. **Per the pre-registration, no further strategy variants are added.** The app stays a research and watchlist tool, and the Quick Picks warning stays.
 
+## PHASE 1b -- Iterate properly, without fooling ourselves
+
+PHASE 1 tested a dozen strategies one at a time, each with its own pre-registered verdict. That guards each test, but not the *search*: try enough variants on the same history and one will look good by luck. PHASE 1b therefore allows free iteration on a development period, but counts every attempt. Only a candidate that survives explicit selection-bias tests gets one look at data nobody has touched.
+
+### Protocol (`src/backtest/protocol.py`)
+- **Holdout: 2024-01-01 -> today.** Every development loader (`load_prices`, `xbrl_table`, `filing_sections`, `monthly_members`) stops at 2023-12-31, or raises `HoldoutViolation` if asked for a later date.
+  - Labels are computed from dev prices only, so a next-month window that would end in January 2024 has no label at all. `assert_labels_dev` also checks that every label window ends before the holdout.
+  - Only `protocol.final_test(strategy_id, runner)` opens the holdout: once per promoted strategy, logged in `holdout_log.parquet`. A second call is refused.
+- **Registry** (`data/processed/backtest/registry.parquet`, append-only). Every run of every variant is logged with its id, description, parameters, dev rank IC, t-stat, Sharpe, annualized return, timestamp, and its full monthly dev return series (`registry_returns/`). Re-running the same parameters adds a new row: runs are counted, not deduplicated.
+- **Selection-bias statistics over ALL registered variants**:
+  - **Deflated Sharpe ratio** (Bailey & López de Prado, 2014): the probability that the candidate's Sharpe beats the expected maximum Sharpe of N unskilled trials (N = registry size, their Sharpe variance), corrected for skew, fat tails and sample length.
+  - **Probability of backtest overfitting** (CSCV, Bailey, Borwein, López de Prado & Zhu, 2017): the dev months are split into 16 blocks. For each of the 12,870 half/half splits, the in-sample best variant is ranked out of sample. PBO is the share of splits where it lands in the bottom half.
+- **Promotion rule** (fixed before running): the candidate is the variant with the best dev Sharpe among this run's models. It reaches the holdout only if **DSR > 0.95 and PBO < 0.2**. The holdout result is reported whatever it is.
+
+### New information (development period only)
+- **Lazy Prices** (Cohen, Malloy & Nguyen, 2020), in `src/edgar_sections.py` and `src/backtest/lazy_prices.py`.
+  - Risk Factors and MD&A are extracted from every 10-K and 10-Q since 2012 for the top-500 point-in-time universe (~744 issuers). Each 10-K is compared with the previous year's 10-K, and each 10-Q with the same quarter a year earlier.
+  - Features: TF-IDF cosine similarity, sentence-embedding cosine similarity (all-MiniLM-L6-v2 on 8 evenly spaced ~1,000-character chunks, **10-K only**: on CPU, embedding every 10-Q too would take 7+ hours), change in similarity, and log length change, per section.
+  - Point-in-time rules: TF-IDF vocabulary and IDF are fit on pre-2014 filings only; the embedding model is fixed and pretrained; a filing's features exist from its SEC filing date and expire after 200 days.
+  - Extraction reuses the project's HTML-to-text and table-of-contents heuristics. It handles split "Item 1A." / "Risk Factors" headings and running page headers, and treats stubs (< 1,500 characters) or runaway sections (> 400,000 characters, e.g. combined annual reports) as missing.
+- **Kept features**: XBRL SUE (from the filing date) and days since the last filing, insider (Form 4), 13F, momentum, quality.
+- **New transforms**: an **industry-relative** version of each feature (minus its SIC 2-digit median that month, if >= 3 names), and **1- and 3-month changes** (same ticker, exact calendar months).
+
+### Models and portfolio (`src/backtest/phase1b.py`, `src/run_phase1b.py`)
+- **Feature sets**: base -> +SUE -> +text -> +industry-relative -> +changes.
+- **Models**: LightGBM regressor, **LightGBM lambdarank** (one query group per month, relevance = decile of next-month return), ridge, and a regressor+ranker rank-average ensemble. Single-signal references: momentum, SUE, text similarity.
+- **Walk-forward**: 36 training months, test blocks of 6, embargo 1. Target: rank of the next month's return (next open to next open).
+- **Portfolio**: top decile, monthly, equal weight, **0.15%/side** on turnover. A **volatility-targeted** version (15% annual volatility from the previous 12 months only, capped at 1.5x, cash at the T-bill rate) allows comparison with SPY at similar risk.
+
+```bash
+python src/run_phase1b.py                  # dev panel, all variants -> registry, DSR/PBO, promotion (+ holdout only if promoted)
+python src/run_phase1b.py --no-embeddings  # TF-IDF similarity only
+```
+
+### Status: first run interrupted (no verdict yet)
+The first `run_phase1b.py` run built the dev panel (48,188 stock-months, 2013-08 -> 2023-12). Text came from 37,740 filings of 706 issuers, 26,497 of them filed in the dev period, with 12,682 10-K section embeddings.
+- It registered **11 of 24 planned variants** before the session ended. Those 11 stay in the registry and count as trials.
+- **Dev results so far are weak**:
+  - best rank IC 0.017 (t 1.23, LightGBM on base+SUE+text);
+  - portfolio Sharpe 0.20-0.58 (8-10%/yr) over 88 dev months;
+  - adding SUE and text moved IC by less than its noise.
+- **No promotion decision has been made, and the holdout has not been touched** (`promotions.parquet` and `holdout_log.parquet` don't exist yet).
+- Finishing the run should register only the 13 missing variants. Re-running identical variants would double-count trials in the deflated Sharpe ratio.
+
+### PHASE 1b addendum (2026-10-10) -- closing PHASE 1b: one holdout look for the 11 registered variants
+**Written and committed before the PHASE 1b holdout was opened.** The first run registered 11 of the 24 planned variants and stopped, and none was promoted. The remaining 13 (the +industry and +changes feature sets, and the single-signal references) are **not** run: running them now, after this addendum, would be more development, not a test. PHASE 1b closes with this one look.
+
+- **Variants judged**: exactly the 11 in `registry.parquet`, with no change of model, features or parameters: {LightGBM regression, ridge, lambdarank, reg+rank ensemble} on base and base+sue, and {LightGBM regression, ridge, lambdarank} on base+sue+text (`phase1b_addendum.VARIANTS`).
+- **How**: the panel is rebuilt through the data end, with the same code, the holdout open, the TF-IDF still fit on pre-2014 filings, and the same MiniLM model. Each variant's walk-forward (36 training months, test blocks of 6, embargo 1) runs over the full period, so holdout months are predicted by models trained only on earlier months. Only signal months >= 2024-01-01 are judged. Gate: `protocol.addendum_holdout`, logged *before* it runs, so a crash still counts as a look; a second run is refused without `--force`, and a forced run is flagged in the report.
+- **A variant PASSES** only if, on the holdout months, all three hold:
+  1. its per-date rank IC NW t (1 lag) is > 2 after a **Holm** correction over the 11: the two-sided p-value, Holm-adjusted, is < 0.0455 (the p of t = 2 for a single test), with t > 0;
+  2. its mean rank IC is > 0;
+  3. its **top-minus-bottom decile** spread after costs (monthly, 0.15%/side on each leg's turnover) has a mean > 0.
+
+  Otherwise it is NO EDGE.
+- **Lazy Prices PASSED** only if at least one of the three base+sue+text variants passes **and** its holdout mean rank IC is higher than the same model's on base+sue. Without the second condition, a pass could come entirely from the non-text features. Otherwise **FAILED**. This result decides STEP 16 in `PREREGISTRATION_PHASE3.md`: if Lazy Prices failed, STEP 16 is dropped; if it passed, STEP 16 is kept only as a confirmation on the small-cap band.
+- **Reported, not part of the verdict**: top-decile long-only return vs SPY over the same months, and each variant's development IC recomputed in this run vs its registered value (a pipeline check).
+
+```bash
+python src/run_phase1b_addendum.py     # -> data/processed/backtest/phase1b/addendum_report.md
+```
+
+### PHASE 1b addendum -- result (holdout opened once: 2026-10-10 18:51 UTC, commit `cb5e8eb`)
+Holdout signal months 2024-01 -> 2026-07 (31 months with a next-month label), top-500 point-in-time universe.
+
+| Variant | Mean rank IC | NW t | Holm p | Decile spread / month, net | Top decile / yr | SPY / yr | Checks | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| lgbm_reg / base | -0.0012 | -0.07 | 1.000 | -0.09% | +20.3% | +21.0% | 0/3 | NO EDGE |
+| ridge / base | -0.0348 | -1.61 | 1.000 | -1.66% | +5.8% | +21.0% | 0/3 | NO EDGE |
+| lgbm_rank / base | -0.0030 | -0.13 | 1.000 | +0.53% | +28.7% | +21.0% | 1/3 | NO EDGE |
+| ensemble / base | -0.0050 | -0.24 | 1.000 | +0.22% | +24.8% | +21.0% | 1/3 | NO EDGE |
+| lgbm_reg / base+sue | -0.0044 | -0.21 | 1.000 | -0.35% | +23.7% | +21.0% | 0/3 | NO EDGE |
+| ridge / base+sue | -0.0344 | -1.53 | 1.000 | -1.53% | +6.5% | +21.0% | 0/3 | NO EDGE |
+| lgbm_rank / base+sue | +0.0251 | 0.93 | 1.000 | +1.05% | +31.5% | +21.0% | 2/3 | NO EDGE |
+| ensemble / base+sue | +0.0145 | 0.66 | 1.000 | +0.91% | +32.2% | +21.0% | 2/3 | NO EDGE |
+| lgbm_reg / base+sue+text | +0.0046 | 0.23 | 1.000 | +0.03% | +24.7% | +21.0% | 2/3 | NO EDGE |
+| ridge / base+sue+text | -0.0307 | -1.39 | 1.000 | -1.73% | +4.7% | +21.0% | 0/3 | NO EDGE |
+| lgbm_rank / base+sue+text | +0.0194 | 0.70 | 1.000 | +1.34% | +37.2% | +21.0% | 2/3 | NO EDGE |
+
+**Lazy Prices: FAILED.** No base+sue+text variant passes. Text raised the holdout IC for LightGBM regression (+0.0046 vs -0.0044) and ridge (-0.0307 vs -0.0344), and lowered it for lambdarank (+0.0194 vs +0.0251). None of these changes is distinguishable from noise.
+
+- No variant comes close to the bar: the best NW t is 0.93, against > 2 *before* any correction. The Holm step did not decide anything.
+- Several top deciles beat SPY over these 31 months (lambdarank with text: +37.2%/yr vs +21.0%). This is not part of the verdict, and their rank ICs are indistinguishable from 0. A top decile of the top-500 in a strong large-cap market can beat SPY without any ordering skill, much like random pickers.
+- **Pipeline check.** On the development panel, the addendum code reproduces every registered dev IC exactly. On the full panel, the recomputed dev ICs differ slightly (e.g. +0.0157 vs +0.0167). The full panel adds December 2023's label (it was unlabelled in dev because its window crossed the holdout), and the walk-forward blocks fall differently over a longer date range. The differences are small, and the sign never flips for a variant with |IC| > 0.005.
+
+**PHASE 1b is closed.** None of the 11 registered variants has an edge on the holdout, and the 13 unrun variants stay unrun.
+
+| Phase | Strategy | Test | Annualized after costs (holdout) | SPY, same months | Verdict |
+|---|---|---|---|---|---|
+| 1b | 11 registered LightGBM / ridge / lambdarank / ensemble variants, top 500 | best holdout rank IC t 0.93 (Holm over 11) | top decile +4.7% to +37.2%; spread -19.8% to +14.8% | +21.0% | NO EDGE (all 11) |
+| 1b | Lazy Prices text features (top 500) | text variants: none passes; adds IC in 2 of 3 models, by noise-level amounts | -- | -- | FAILED |
+
 ## PHASE 2 -- Three pre-registered event rules (`python src/run_phase2.py`)
 
 Rules: `PREREGISTRATION_PHASE2.md` (committed 2026-09-29, before any Phase 2 code touched data). Development period: signals from 2013-09-01 to 2024-08-31, and trades must also exit by then. Holdout: 2024-09-01 to the data end (2026-09-25), run once, locked by `holdout.lock`. A rule PASSES only if all 5 checks hold in **both** periods: mean excess > 0, NW t >= 2.4, bootstrap 95% CI > 0, beats >= 95% of 200 random pickers, portfolio CAGR > benchmark at the same exposure.

@@ -20,5 +20,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-lock.txt
-      - name: Run tests (needs_data tests are skipped: data/ is never committed)
+      - name: "Run tests (needs_data tests are skipped: data/ is never committed)"
         run: pytest -q -p no:cacheprovider

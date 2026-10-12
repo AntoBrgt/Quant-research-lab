@@ -12,7 +12,7 @@
 
 **None beat SPY or IWM after costs.** Several beat most *random* stock pickers, and a few had good stretches, but none cleared a pre-registered bar on data it had never seen. The repository is built to make that answer trustworthy: every rule was fixed in a commit before its test ran, and every holdout was opened once.
 
-Live site: *coming in deployment step S4* · Full step-by-step log: [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md) · Pre-registrations: [Phase 2](PREREGISTRATION_PHASE2.md)
+Live site: *link added once deployed* ([how it's deployed](docs/DEPLOY.md)) · Full step-by-step log: [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md) · Pre-registrations: [Phase 2](PREREGISTRATION_PHASE2.md)
 
 ## Verdicts
 
@@ -71,6 +71,7 @@ The original Streamlit research app is kept as a local tool (`streamlit run app.
 | `app.py`, `pages/` | Streamlit research app (local) |
 | `tests/` | 370+ tests: look-ahead, embargo, costs, locks, verdict rules |
 | `docs/RESEARCH_LOG.md` | the full research log, STEP by STEP |
+| `src/export_site_data.py`, `site/` | read-only export of the results to JSON, and the static site built from it ([docs/DEPLOY.md](docs/DEPLOY.md)) |
 
 ## What I learned
 

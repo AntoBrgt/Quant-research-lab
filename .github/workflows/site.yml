@@ -1,0 +1,76 @@
+name: site
+
+# Rebuilds and checks the static site whenever it (or its data) changes.
+# - Every push / PR touching site/: build + check-build (disclaimer on every page, every verdict shown).
+# - Push to main: optional deploys.
+#     Vercel: its Git integration redeploys on push by itself. If you also set the secret
+#             VERCEL_DEPLOY_HOOK_URL, this workflow triggers that hook after a green build.
+#     GitHub Pages (fallback): set the repository variable DEPLOY_TARGET=pages and choose
+#             Settings -> Pages -> Source: "GitHub Actions".
+
+on:
+  push:
+    paths: ["site/**", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["site/**", ".github/workflows/site.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - name: Build (base path only for GitHub Pages)
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          BASE_PATH: ${{ vars.DEPLOY_TARGET == 'pages' && format('/{0}', github.event.repository.name) || '' }}
+      - name: Check the built pages against the exported data
+        run: node scripts/check-build.mjs
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DEPLOY_TARGET == 'pages'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/out
+
+  deploy-pages:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DEPLOY_TARGET == 'pages'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  vercel-hook:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the Vercel deploy hook (only if the secret is set)
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "No VERCEL_DEPLOY_HOOK_URL secret: Vercel's Git integration handles deploys."; exit 0; fi
+          curl -fsS -X POST "$HOOK" > /dev/null && echo "Vercel deploy hook triggered."

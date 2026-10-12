@@ -693,3 +693,67 @@ Every strategy tested from STEP 11b to STEP 15, on point-in-time, survivorship-a
 | 14a | Small-cap LightGBM, top decile | OOS rank IC -0.001, t -0.05 | +6.4% as priced; -66% in the -50% survivorship case | IWM +9.5%, SPY +15.2% | DOES NOT BEAT MARKET |
 
 **Conclusion.** Tested with point-in-time data, embargoed walk-forward validation, costs, random baselines and pre-registered verdict rules, none of the ranking, trading-loop, value/survival or small-cap strategies beat simply holding SPY. Several beat most random pickers (the STEP 15 screen and the app's short-term picks), but not the market. **Per the pre-registration, no further strategy variants are added.** The app stays a research and watchlist tool, and the Quick Picks warning stays.
+
+## PHASE 2 -- Three pre-registered event rules (`python src/run_phase2.py`)
+
+Rules: `PREREGISTRATION_PHASE2.md` (committed 2026-09-29, before any Phase 2 code touched data). Development period: signals from 2013-09-01 to 2024-08-31, and trades must also exit by then. Holdout: 2024-09-01 to the data end (2026-09-25), run once, locked by `holdout.lock`. A rule PASSES only if all 5 checks hold in **both** periods: mean excess > 0, NW t >= 2.4, bootstrap 95% CI > 0, beats >= 95% of 200 random pickers, portfolio CAGR > benchmark at the same exposure.
+
+- **H1** insider cluster: >= 3 distinct officer/director open-market buyers filed within 30 days. Small caps, 63 days or a 2.5 ATR stop, vs IWM.
+- **H2** earnings drift: SUE >= the 90th percentile of the previous 365 days' universe SUEs. Small caps, 60 days, vs IWM.
+- **H3** cheap quality + trend: a STEP 15 candidate above its 200-day average. Top 500, +30% target / thesis break / 252 days, vs SPY.
+
+### Bug fixed after the development run, before the holdout
+The development run exists to find bugs, and it found one in H2. `sec_xbrl.sue_series` dates each quarter by the first filing that tags it, so one 10-K/10-Q can also be the first to tag *older* quarters. For example, RGR's 10-K of 2014-02-25 carries its 2013-Q2 and Q3 EPS, and ADUS's 10-Q of 2020-08-10 carries 2018-Q4 and 2019-Q4. H2 treated each of those as a separate fresh surprise. That caused two problems:
+- one filing became 2-3 identical trades (8 extra trades);
+- a filing could trigger on a stale quarter's SUE, although the quarter it actually reports was below the threshold. ADUS fired on its 2019-Q4 SUE of 5.87; its own 2020-Q2 SUE was 0.17.
+
+The registration defines H2 per filing ("a 10-Q/10-K filing whose SUE ..."). The fix (`phase2_signals.earnings_surprise_events`, test `test_h2_one_event_per_filing_using_its_latest_period`) keeps one SUE per (ticker, filing date): the one for the latest period end, for both the signal and the threshold pool. `sec_xbrl.py` (Phase 1) is unchanged. No parameter changed, and H1/H3 were not affected.
+
+**Effect on the development result**: 2,074 -> 2,033 trades, mean excess +0.81% -> +0.80%, NW t 2.15 -> 2.50. The fix therefore moved H2 across the t bar. It still fails two other checks in development (CI and random pickers), so it cannot pass.
+
+### Development results (no verdict on their own)
+
+| Hypothesis | Trades | Mean excess / trade | NW t | 95% CI | Random pct | Portfolio CAGR | Bench, same exposure | Checks |
+|---|---|---|---|---|---|---|---|---|
+| H1 Insider cluster buying (small caps) | 1,104 | +0.70% | -0.09 | [-0.60%, +1.98%] | 74 | +1.21% | +6.31% (IWM) | 1/5 |
+| H2 Post-earnings drift, top-decile SUE (small caps) | 2,033 | +0.80% | 2.50 | [-0.33%, +2.12%] | 68 | +9.18% | +6.93% (IWM) | 3/5 |
+| H3 Cheap quality + above 200-day average (top 500) | 122 | -3.55% | -0.67 | [-7.31%, +0.66%] | 93 | +2.74% | +3.13% (SPY) | 0/5 |
+
+- H1's positive mean per trade comes from a few huge winners (e.g. NXH +523% in 2020). The median trade is -3.1%, and the average of the 131 monthly means is -0.09%.
+- H2 beats IWM at the same exposure (+9.2% vs +6.9%) with t 2.5, but 68% of random small-cap pickers on the same dates do as well. That points to a market or size effect on those dates rather than stock selection.
+- H3 has few trades: STEP 15 candidates are >= 25% below their 52-week high, so few are above their 200-day average (180 of 4,197 candidate-months).
+
+No rule passes in development. Under the "both periods" rule, every hypothesis is therefore NOT PROVEN before the holdout is opened. The holdout is still run once as registered, and reported below.
+
+### Holdout (run once: 2026-10-10 12:27 UTC, commit `2aea837`, `holdout.lock`)
+
+| Hypothesis | Period | Trades | Mean excess / trade | NW t | 95% CI | Random pct | Portfolio CAGR | Bench, same exposure | Checks | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| H1 Insider cluster buying | development | 1,104 | +0.70% | -0.09 | [-0.60%, +1.98%] | 74 | +1.21% | +6.31% (IWM) | 1/5 | |
+| | holdout | 281 | +0.80% | 1.25 | [-2.15%, +4.11%] | 78 | +11.03% | +12.93% (IWM) | 1/5 | **NOT PROVEN** |
+| H2 Top-decile SUE drift | development | 2,033 | +0.80% | 2.50 | [-0.33%, +2.12%] | 68 | +9.18% | +6.93% (IWM) | 3/5 | |
+| | holdout | 699 | -1.86% | -2.22 | [-3.95%, +0.12%] | 8 | +3.65% | +14.73% (IWM) | 0/5 | **NOT PROVEN** |
+| H3 Cheap quality + 200-day trend | development | 122 | -3.55% | -0.67 | [-7.31%, +0.66%] | 93 | +2.74% | +3.13% (SPY) | 0/5 | |
+| | holdout | 44 | +6.34% | 0.32 | [-2.34%, +12.71%] | 100 | +17.26% | +6.93% (SPY) | 3/5 | **NOT PROVEN** |
+
+- **H2 reversed.** Its development t of 2.5 became -2.2 in the holdout: worse than 92% of random pickers, and +3.7%/yr vs IWM +14.7%. The development edge did not survive fresh data.
+- **H1** is positive in both periods, but never close to significant (t 1.25), and trails IWM at the same exposure in both.
+- **H3** looks good in the holdout, but on only 44 trades, with t 0.32 and a CI that includes 0. It failed every check in development. The rule requires both periods, and two good years on 44 trades are what luck produces, so this is not a lead to rescue.
+
+**Check (not part of the verdict): trades still open at the data end** (`python src/phase2_checks.py`). The registered rule counts a trade still open on 2026-09-25 at its return so far. Dropping those trades removes the most recent entries, so this is a different sample, not a corrected one.
+
+| Hypothesis | Holdout trades | Open at data end | Mean excess (all) | Mean excess (closed only) | NW t (closed only) | 95% CI (closed only) |
+|---|---|---|---|---|---|---|
+| H1 | 281 | 28 | +0.80% | +0.91% | 0.63 | [-2.46%, +4.54%] |
+| H2 | 699 | 92 | -1.86% | -2.43% | -2.79 | [-4.69%, -0.45%] |
+| H3 | 44 | 15 | +6.34% | +14.95% | 1.20 | [+1.59%, +24.53%] |
+
+The H3 "closed only" line is biased upward by construction. A recent H3 trade can only have closed early by hitting its +30% target, so dropping open trades keeps recent winners and removes recent trades still in progress. H1 and H2 are unchanged in direction.
+
+**PHASE 2 VERDICT: all three rules NOT PROVEN.** No variant of H1-H3 is added. Per the pre-registration's "No pass" clause, the Quick Picks page must stop showing BUY/SELL orders and become a watchlist labelled "no validated strategy". **Applied 2026-10-12:** `pages/0_Quick_Picks.py` is now "Quick Picks -- watchlist". It shows the top and bottom of the same ranking, with the price, evidence label and reason, under a "No validated strategy" warning. BUY/SELL lines, share sizing, budget/risk inputs and stop/target levels are removed. `screener.quick_picks` is unchanged; the page only displays less of it.
+
+| Phase | Strategy | Test | Annualized after costs (holdout) | Benchmark, same exposure | Verdict |
+|---|---|---|---|---|---|
+| 2 | H1 insider cluster buying (small caps) | holdout t 1.25, random pct 78 | +11.0% (2024-09 -> 2026-09) | IWM +12.9% | NOT PROVEN |
+| 2 | H2 top-decile SUE drift (small caps) | holdout t -2.22, random pct 8 | +3.7% | IWM +14.7% | NOT PROVEN |
+| 2 | H3 cheap quality + 200-day trend (top 500) | holdout t 0.32 (44 trades); development 0/5 | +17.3% | SPY +6.9% at 38% exposure | NOT PROVEN |

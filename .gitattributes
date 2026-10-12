@@ -1,1 +1,5 @@
 site/public/data/*.json text eol=lf
+
+# Generated files: collapsed in GitHub diffs and excluded from language stats
+site/package-lock.json linguist-generated=true
+site/public/data/*.json linguist-generated=true

@@ -97,3 +97,24 @@ class FakeLLM:
 class _FakeExtraction:
     def __init__(self, signal_dicts: list[dict]):
         self.signals = [FakeSignal(**d) for d in signal_dicts]
+
+
+# --- needs_data: tests that read local caches (data/) or the network ---------------
+# data/ is never committed, so CI has none of it. Mark such tests with
+# @pytest.mark.needs_data; they are skipped unless the caches exist locally
+# (data/processed/backtest) or RUN_DATA_TESTS=1 forces them.
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "needs_data: needs local data caches (data/) or network; skipped in CI")
+
+
+def pytest_collection_modifyitems(config, items):
+    import os
+
+    if os.getenv("RUN_DATA_TESTS") == "1" or (ROOT_DIR / "data" / "processed" / "backtest").exists():
+        return
+    skip = pytest.mark.skip(reason="needs local data caches (data/) or network -- not available here")
+    for item in items:
+        if "needs_data" in item.keywords:
+            item.add_marker(skip)

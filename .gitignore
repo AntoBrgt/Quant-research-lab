@@ -5,4 +5,10 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
-data/
+data/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.parquet
+node_modules/
+site/.next/
+site/out/

@@ -24,7 +24,7 @@ import screener
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-BACKTEST_README_URL = "https://github.com/AntoBrgt/Quant-research-lab#phase-2----three-pre-registered-event-rules-python-srcrun_phase2py"
+BACKTEST_README_URL = "https://github.com/AntoBrgt/Quant-research-lab/blob/main/docs/RESEARCH_LOG.md#phase-2----three-pre-registered-event-rules-python-srcrun_phase2py"
 
 st.set_page_config(page_title="Quick Picks", layout="wide")
 st.title("Quick Picks -- watchlist")

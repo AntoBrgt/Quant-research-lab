@@ -1,0 +1,105 @@
+{
+ "code_commit": "cffd83c",
+ "generated_at": "2026-10-12T18:56:57+02:00",
+ "rows": [
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits and sizing",
+   "name": "score_rank / hold 10",
+   "percentile": 93.0,
+   "step": "13b"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits and sizing",
+   "name": "momentum_12_1 / hold 10",
+   "percentile": 69.0,
+   "step": "13b"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits and sizing",
+   "name": "breakout_20d / hold 10",
+   "percentile": 5.0,
+   "step": "13b"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits and sizing",
+   "name": "score_rank + ML filter (P >= train-chosen threshold) / hold 10, OOS dates",
+   "percentile": 90.0,
+   "step": "13b"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits",
+   "name": "(a) trailing stop 2 ATR",
+   "percentile": 30.0,
+   "step": "13c"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits",
+   "name": "(b) trailing stop 3 ATR",
+   "percentile": 78.0,
+   "step": "13c"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random weekly pickers, same exits",
+   "name": "(c) target 2R / stop 1.5 ATR",
+   "percentile": 52.0,
+   "step": "13c"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "100 random-candidate portfolios",
+   "name": "Cheap quality + XGBoost survival (+30%), primary",
+   "percentile": 76.0,
+   "step": "15"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "200 random pickers, same dates and exits",
+   "name": "H1 Insider cluster buying (small caps) (development)",
+   "percentile": 74.0,
+   "step": "2"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "200 random pickers, same dates and exits",
+   "name": "H1 Insider cluster buying (small caps) (holdout)",
+   "percentile": 77.5,
+   "step": "2"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "200 random pickers, same dates and exits",
+   "name": "H2 Post-earnings drift, top-decile SUE (small caps) (development)",
+   "percentile": 68.5,
+   "step": "2"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "200 random pickers, same dates and exits",
+   "name": "H2 Post-earnings drift, top-decile SUE (small caps) (holdout)",
+   "percentile": 7.5,
+   "step": "2"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "200 random pickers, same dates and exits",
+   "name": "H3 Cheap quality + above 200-day average (top 500) (development)",
+   "percentile": 93.0,
+   "step": "2"
+  },
+  {
+   "bar": 95.0,
+   "baseline": "200 random pickers, same dates and exits",
+   "name": "H3 Cheap quality + above 200-day average (top 500) (holdout)",
+   "percentile": 100.0,
+   "step": "2"
+  }
+ ],
+ "schema_version": 1
+}

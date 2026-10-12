@@ -1,0 +1,196 @@
+{
+ "code_commit": "cffd83c",
+ "generated_at": "2026-10-12T18:56:57+02:00",
+ "holdout_looks": 1,
+ "lazy_prices": "FAILED",
+ "rows": [
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": false
+   },
+   "features": "base",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.00115,
+   "model": "lgbm_reg",
+   "months": 31,
+   "nw_t": -0.070069,
+   "spread_mean_monthly": -0.000936,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.202675,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": false
+   },
+   "features": "base",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.03484,
+   "model": "ridge",
+   "months": 31,
+   "nw_t": -1.606056,
+   "spread_mean_monthly": -0.016641,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.057707,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": true
+   },
+   "features": "base",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.002983,
+   "model": "lgbm_rank",
+   "months": 31,
+   "nw_t": -0.127603,
+   "spread_mean_monthly": 0.005322,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.286651,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": true
+   },
+   "features": "base",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.00504,
+   "model": "ensemble",
+   "months": 31,
+   "nw_t": -0.243306,
+   "spread_mean_monthly": 0.002196,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.247686,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": false
+   },
+   "features": "base+sue",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.004432,
+   "model": "lgbm_reg",
+   "months": 31,
+   "nw_t": -0.210168,
+   "spread_mean_monthly": -0.003542,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.236659,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": false
+   },
+   "features": "base+sue",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.034396,
+   "model": "ridge",
+   "months": 31,
+   "nw_t": -1.533581,
+   "spread_mean_monthly": -0.015323,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.064764,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": true,
+    "spread_after_costs_positive": true
+   },
+   "features": "base+sue",
+   "holm_p": 1.0,
+   "mean_rank_ic": 0.025107,
+   "model": "lgbm_rank",
+   "months": 31,
+   "nw_t": 0.927394,
+   "spread_mean_monthly": 0.010532,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.315347,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": true,
+    "spread_after_costs_positive": true
+   },
+   "features": "base+sue",
+   "holm_p": 1.0,
+   "mean_rank_ic": 0.014479,
+   "model": "ensemble",
+   "months": 31,
+   "nw_t": 0.657973,
+   "spread_mean_monthly": 0.009079,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.321618,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": true,
+    "spread_after_costs_positive": true
+   },
+   "features": "base+sue+text",
+   "holm_p": 1.0,
+   "mean_rank_ic": 0.004586,
+   "model": "lgbm_reg",
+   "months": 31,
+   "nw_t": 0.231615,
+   "spread_mean_monthly": 0.000284,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.247233,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": false,
+    "spread_after_costs_positive": false
+   },
+   "features": "base+sue+text",
+   "holm_p": 1.0,
+   "mean_rank_ic": -0.030654,
+   "model": "ridge",
+   "months": 31,
+   "nw_t": -1.385491,
+   "spread_mean_monthly": -0.017283,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.047181,
+   "verdict": "NO EDGE"
+  },
+  {
+   "checks": {
+    "holm_t_above_2": false,
+    "mean_ic_positive": true,
+    "spread_after_costs_positive": true
+   },
+   "features": "base+sue+text",
+   "holm_p": 1.0,
+   "mean_rank_ic": 0.019394,
+   "model": "lgbm_rank",
+   "months": 31,
+   "nw_t": 0.696964,
+   "spread_mean_monthly": 0.013354,
+   "spy_annualized": 0.210032,
+   "top_decile_annualized": 0.37183,
+   "verdict": "NO EDGE"
+  }
+ ],
+ "schema_version": 1
+}

@@ -1,0 +1,125 @@
+{
+ "code_commit": "cffd83c",
+ "generated_at": "2026-10-12T18:56:57+02:00",
+ "schema_version": 1,
+ "step14a": {
+  "note": "Rank IC = per-date Spearman correlation between the score and the next 63-day excess return vs IWM.",
+  "series": {
+   "momentum_12_1": [
+    {
+     "dates": 1,
+     "mean_rank_ic": -0.090853,
+     "year": 2016
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.022658,
+     "year": 2017
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.039977,
+     "year": 2018
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.031904,
+     "year": 2019
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.104708,
+     "year": 2020
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.000314,
+     "year": 2021
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.061836,
+     "year": 2022
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.012284,
+     "year": 2023
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.034823,
+     "year": 2024
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.013529,
+     "year": 2025
+    },
+    {
+     "dates": 5,
+     "mean_rank_ic": -0.051749,
+     "year": 2026
+    }
+   ],
+   "score_ml": [
+    {
+     "dates": 1,
+     "mean_rank_ic": 0.06804,
+     "year": 2016
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.00869,
+     "year": 2017
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.036134,
+     "year": 2018
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.043645,
+     "year": 2019
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.100984,
+     "year": 2020
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.038144,
+     "year": 2021
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.003657,
+     "year": 2022
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.011383,
+     "year": 2023
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": 0.107423,
+     "year": 2024
+    },
+    {
+     "dates": 12,
+     "mean_rank_ic": -0.022385,
+     "year": 2025
+    },
+    {
+     "dates": 5,
+     "mean_rank_ic": 0.084899,
+     "year": 2026
+    }
+   ]
+  },
+  "title": "STEP 14a small caps: mean rank IC by year (out of sample)"
+ }
+}

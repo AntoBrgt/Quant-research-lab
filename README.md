@@ -18,7 +18,7 @@ Live site: *coming in deployment step S4* · Full step-by-step log: [docs/RESEAR
 
 | Phase | Test | Result | Annualized after costs | Benchmark, same period | Verdict |
 |---|---|---|---|---|---|
-| 1 (11b, 12, 13) | Ranking models: app score, LightGBM, + insider/13F features | best OOS rank IC 0.020, t 0.69 | -- (ranking tests) | -- | No edge / not promoted |
+| 1 (11b, 12, 13) | Ranking models: app score, LightGBM, + insider/13F features | best OOS rank IC 0.020, t 0.69 | -- (ranking test) | -- | No edge / not promoted |
 | 1 (13b) | Short-term loop, app picks, hold 10 days | expectancy +0.005R, CI [-0.055, +0.068] | +1.9% (2019-26) | SPY +16.1% | NOT PROVEN |
 | 1 (13c) | Same loop, best of 3 pre-registered exits (trailing 3 ATR) | expectancy +0.053R, CI [-0.012, +0.120] | +6.7% | SPY at same exposure +11.8% | NOT PROVEN |
 | 1 (15) | Cheap quality + XGBoost survival model, +30% target | concordance 0.54 | +8.1% (2017-26) | SPY +15.3% | DOES NOT BEAT MARKET |

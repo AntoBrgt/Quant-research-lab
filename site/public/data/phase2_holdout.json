@@ -1,0 +1,155 @@
+{
+ "code_commit": "cffd83c",
+ "generated_at": "2026-10-12T18:56:57+02:00",
+ "holdout_runs": [
+  {
+   "commit": "2aea837",
+   "forced": false,
+   "time": "2026-10-10T12:27:31+00:00"
+  }
+ ],
+ "results_commit": "2aea837",
+ "rows": [
+  {
+   "benchmark": "IWM",
+   "benchmark_same_exposure_cagr": 0.06305,
+   "checks": {
+    "beats_95pct_random": false,
+    "ci_above_zero": false,
+    "mean_excess_positive": true,
+    "portfolio_beats_benchmark": false,
+    "t_at_least_2.4": false
+   },
+   "checks_passed": 1,
+   "ci_high": 0.01981,
+   "ci_low": -0.006002,
+   "hypothesis": "H1",
+   "mean_excess": 0.006983,
+   "name": "Insider cluster buying (small caps)",
+   "nw_t": -0.0932,
+   "period": "development",
+   "portfolio_cagr": 0.012147,
+   "random_pct": 74.0,
+   "trades": 1104
+  },
+  {
+   "benchmark": "IWM",
+   "benchmark_same_exposure_cagr": 0.12927,
+   "checks": {
+    "beats_95pct_random": false,
+    "ci_above_zero": false,
+    "mean_excess_positive": true,
+    "portfolio_beats_benchmark": false,
+    "t_at_least_2.4": false
+   },
+   "checks_passed": 1,
+   "ci_high": 0.041144,
+   "ci_low": -0.021464,
+   "hypothesis": "H1",
+   "mean_excess": 0.007976,
+   "name": "Insider cluster buying (small caps)",
+   "nw_t": 1.246222,
+   "period": "holdout",
+   "portfolio_cagr": 0.110278,
+   "random_pct": 77.5,
+   "trades": 281,
+   "verdict": "NOT PROVEN"
+  },
+  {
+   "benchmark": "IWM",
+   "benchmark_same_exposure_cagr": 0.069332,
+   "checks": {
+    "beats_95pct_random": false,
+    "ci_above_zero": false,
+    "mean_excess_positive": true,
+    "portfolio_beats_benchmark": true,
+    "t_at_least_2.4": true
+   },
+   "checks_passed": 3,
+   "ci_high": 0.021237,
+   "ci_low": -0.003277,
+   "hypothesis": "H2",
+   "mean_excess": 0.008047,
+   "name": "Post-earnings drift, top-decile SUE (small caps)",
+   "nw_t": 2.497988,
+   "period": "development",
+   "portfolio_cagr": 0.091756,
+   "random_pct": 68.5,
+   "trades": 2033
+  },
+  {
+   "benchmark": "IWM",
+   "benchmark_same_exposure_cagr": 0.147322,
+   "checks": {
+    "beats_95pct_random": false,
+    "ci_above_zero": false,
+    "mean_excess_positive": false,
+    "portfolio_beats_benchmark": false,
+    "t_at_least_2.4": false
+   },
+   "checks_passed": 0,
+   "ci_high": 0.001189,
+   "ci_low": -0.039516,
+   "hypothesis": "H2",
+   "mean_excess": -0.018638,
+   "name": "Post-earnings drift, top-decile SUE (small caps)",
+   "nw_t": -2.220246,
+   "period": "holdout",
+   "portfolio_cagr": 0.036511,
+   "random_pct": 7.5,
+   "trades": 699,
+   "verdict": "NOT PROVEN"
+  },
+  {
+   "benchmark": "SPY",
+   "benchmark_same_exposure_cagr": 0.031267,
+   "checks": {
+    "beats_95pct_random": false,
+    "ci_above_zero": false,
+    "mean_excess_positive": false,
+    "portfolio_beats_benchmark": false,
+    "t_at_least_2.4": false
+   },
+   "checks_passed": 0,
+   "ci_high": 0.006615,
+   "ci_low": -0.073107,
+   "hypothesis": "H3",
+   "mean_excess": -0.035526,
+   "name": "Cheap quality + above 200-day average (top 500)",
+   "nw_t": -0.669992,
+   "period": "development",
+   "portfolio_cagr": 0.02743,
+   "random_pct": 93.0,
+   "trades": 122
+  },
+  {
+   "benchmark": "SPY",
+   "benchmark_same_exposure_cagr": 0.069317,
+   "checks": {
+    "beats_95pct_random": true,
+    "ci_above_zero": false,
+    "mean_excess_positive": true,
+    "portfolio_beats_benchmark": true,
+    "t_at_least_2.4": false
+   },
+   "checks_passed": 3,
+   "ci_high": 0.127096,
+   "ci_low": -0.023388,
+   "hypothesis": "H3",
+   "mean_excess": 0.063417,
+   "name": "Cheap quality + above 200-day average (top 500)",
+   "nw_t": 0.321367,
+   "period": "holdout",
+   "portfolio_cagr": 0.172593,
+   "random_pct": 100.0,
+   "trades": 44,
+   "verdict": "NOT PROVEN"
+  }
+ ],
+ "schema_version": 1,
+ "verdicts": {
+  "H1": "NOT PROVEN",
+  "H2": "NOT PROVEN",
+  "H3": "NOT PROVEN"
+ }
+}
